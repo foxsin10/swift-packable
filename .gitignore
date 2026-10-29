@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+/output/
+*.xcframework
+*.xcframework.zip
+.DS_Store
+.claude/settings.local.json
