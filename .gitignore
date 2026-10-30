@@ -5,3 +5,5 @@
 *.xcframework.zip
 .DS_Store
 .claude/settings.local.json
+/Examples/build/
+.vscode
