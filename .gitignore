@@ -1,9 +1,18 @@
+# SwiftPM build state. Without a leading slash these match at any depth, which covers the
+# example packages and test fixtures too.
 .build/
 .swiftpm/
+
+# Example packages: build folders, plus the showcase script's outputs and binary cache.
+/Examples/*/.build/
+/Examples/build/
+
+# Generated binaries.
 /output/
 *.xcframework
 *.xcframework.zip
+
+# Local tooling.
 .DS_Store
-.claude/settings.local.json
-/Examples/build/
 .vscode
+.claude/settings.local.json
