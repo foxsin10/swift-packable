@@ -1,0 +1,108 @@
+---
+name: swift-packable
+description: Use when packaging a Swift package's library products into XCFrameworks or a binary Package.swift, when switching SwiftPM dependencies between source and prebuilt binary, when writing or editing a packable.yml, or when a swift-packable / `swift packable` command, flag, output folder or error message comes up.
+---
+
+# swift-packable
+
+`swift-packable` turns a Swift package's library products into XCFrameworks plus a binary `Package.swift`, and lets a client package flip each dependency between source and binary from a `packable.yml`. It runs on SwiftPM's Swift Build engine, Apple platforms only.
+
+Check it is installed with `swift-packable --version` (prints the tool version, e.g. `0.1.0`). If it isn't, build it from the swift-packable repo with `swift build -c release` and run `.build/release/swift-packable`, or copy that binary onto PATH. It needs full Xcode (not only Command Line Tools) and the SDK of every platform you build. For every `packable.yml` key, read [packable-yml.md](references/packable-yml.md). For any flag, `swift-packable help <subcommand>` is authoritative.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `swift-packable list [<pkg>]` | Show library products, targets, declared platforms and the slices built by default. Run it first on an unfamiliar package. |
+| `swift-packable [build] [<pkg>] [options]` | Build XCFrameworks. `build` is the default subcommand. |
+| `swift-packable generate` | Write the dependency block into the client's `Package.swift` from `packable.yml`. |
+| `swift-packable use source\|binary <names…>` / `--all` | Change `mode:` in `packable.yml`, regenerate, clear `.build`. |
+
+`swift packable …` works too once the binary is on PATH (the `swift` driver runs any `swift-<name>` executable).
+
+## Building XCFrameworks
+
+```bash
+swift-packable path/to/MyPackage                                  # every library product, manifest platforms
+swift-packable path/to/MyPackage -p MyLib --platform ios,ios-simulator,macos -o build/MyLibBinary
+swift-packable path/to/MyPackage --linkage dynamic
+swift-packable path/to/MyPackage --zip --base-url https://example.com/releases/1.0.0
+```
+
+| Option | Use |
+|---|---|
+| `-p, --product` | Product to package; repeat for several. Default: all library products. |
+| `--platform` | `macos`, `maccatalyst`, `ios`, `ios-simulator`, `tvos`, `tvos-simulator`, `watchos`, `watchos-simulator`, `visionos`, `visionos-simulator`; repeat or comma-separate. Default: the manifest's `platforms:` (device + simulator each), or macOS + iOS when none is declared. |
+| `--arch` | Per-slice architectures: `ios-simulator=arm64`, `macos=arm64,x86_64`. |
+| `--deployment-target` | Override, e.g. `ios=15.0` (device and simulator). |
+| `-o, --output` | Default: `<package>-binary` next to the package. |
+| `-c, --configuration` | `release` (default) or `debug`. |
+| `--linkage` | `static` (default) or `dynamic`. |
+| `--zip` / `--base-url` | Zip each XCFramework with its checksum; `--base-url` (requires `--zip`) makes the generated manifest use `url:` + `checksum:`. |
+| `--skip-interface-verification` | When emitted `.swiftinterface` files don't verify. Also keeps compiled `.swiftmodule`s. |
+| `--include-binary-swiftmodules` | Keep compiled `.swiftmodule`s without skipping verification. |
+| `--bundle-id-prefix`, `--framework-version` | `CFBundleIdentifier` prefix (default `packable`) and bundle version (default `1.0.0`). |
+| `--scratch-path` | Default `<package>/.build/packable`. |
+| `-Xswiftc`, `-Xcc`, `-Xlinker` | Pass-through flags (`-Xlinker` also reaches the dylib link with `--linkage dynamic`). |
+| `-v` | Stream `swift build` output. Use it when a build fails. |
+
+Output:
+
+```
+MyPackage-binary/
+├── Package.swift            # same library product names, all binaryTargets
+└── XCFrameworks/
+    ├── MyLib.xcframework    # one XCFramework per module, dependency and C modules included
+    └── MyLibCore.xcframework
+```
+
+Clients point their dependency at that folder (or the published URL) instead of the source; `import`s stay the same. Every generated binary package also has `packable-metadata.json` (source tag/commit and the modules it bundles).
+
+What is handled for you:
+
+- **Module closure.** Each product's XCFrameworks are the modules it actually links, remote dependencies included.
+- **Resources.** For a static module with resources, the generated manifest renames the binary target to `<Module>Binary` and adds a carrier target `<Module>` holding the resource files, so `Bundle.module` works. Dynamic frameworks keep the bundle inside the framework and need no carrier.
+- **Any target layout.** Custom `path:`, `sources:`/`exclude:`, `Source/`, `src/`, `srcs/`, `publicHeadersPath: "."`.
+- **Dynamic frameworks** link their dependency frameworks via `@rpath`, carry dSYMs, and set `MinimumOSVersion` outside macOS.
+
+## Switching a client between source and binary
+
+1. Put `packable.yml` next to the client's `Package.swift` (keys: [packable-yml.md](references/packable-yml.md)):
+   ```yaml
+   dependencies:
+     ShowcaseKit:
+       mode: source
+       source: { path: ../ShowcaseKit }
+   ```
+2. Run `swift-packable generate`. It inserts `packableDependencies` and `packable(_:from:)` between `// packable:begin` and `// packable:end`.
+3. Use those two names in the rest of the manifest. They don't change between modes:
+   ```swift
+   let package = Package(
+     name: "App",
+     dependencies: packableDependencies,
+     targets: [
+       .target(name: "App", dependencies: [packable("ShowcaseKit", from: "ShowcaseKit")])
+     ]
+   )
+   ```
+4. Flip with `swift-packable use binary ShowcaseKit` (or `use source --all`). `use` clears `.build` except checkouts, downloads, the lock file and `index-build`; `--no-clean` skips that.
+
+Binary mode uses `binary:` when declared; otherwise it packages `source` with the build pipeline and caches it (`~/Library/Caches/packable`, `$PACKABLE_CACHE`, or `cache:`). Local sources rebuild only when their files change; remote sources are cached per version. `--rebuild` (on `generate` or `use`) forces a rebuild and moves remote sources to their newest allowed version.
+
+## Common mistakes
+
+| Symptom | Fix |
+|---|---|
+| `xcodebuild -create-xcframework` fails / not found | Command Line Tools are selected. `sudo xcode-select -s /Applications/Xcode.app`. |
+| A platform slice fails to build | Its SDK is missing: `xcodebuild -showsdks`, then `xcodebuild -downloadPlatform iOS` (or tvOS, watchOS, visionOS). |
+| Interface verification error (e.g. swift-collections 1.7.x) | Rebuild with `--skip-interface-verification` (`skip-interface-verification: true` in `packable.yml`). Clients should then use the same compiler version. |
+| Link errors right after switching modes | Stale objects. `use` cleans `.build` unless `--no-clean` or another SwiftPM process held the lock (it warns); in Xcode also Product › Clean Build Folder. |
+| Hand edits inside `// packable:begin … end` disappear | That block is regenerated. Change `packable.yml` and rerun `generate`. |
+| `generate` stops naming a duplicate module | A binary already bundles a module that another entry also provides. Drop the separate entry, or keep both from source. |
+| Warning that a binary was built from a different tag/commit | Version drift between `binary:` and `source:`. Rebuild or repoint the binary. |
+| Validation error on a location | A `path` takes no version; a `url` needs exactly one of `from`, `exact`, `up-to-next-minor`, `branch`, `revision`. |
+| Fresh clone uses the shared cache but builds fail | Run `swift-packable generate` once to fill the cache on this machine. |
+| `swift run` with dynamic frameworks: `Library not loaded: @rpath/…` | `swift run -Xlinker -rpath -Xlinker @executable_path`, or `--build-system native`. Apps and `swift test` are fine. |
+| App using a static `.xcframework` directly (no package) can't find resources | Copy `<Package>_<Module>.bundle` from inside the framework into the app bundle. |
+
+Not supported yet: macro targets and `binaryTarget` dependencies. Apple platforms only.

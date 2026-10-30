@@ -15,6 +15,7 @@ struct SwiftPackable: ParsableCommand {
       `xcodebuild -create-xcframework`, and writes a Package.swift that exposes the \
       results as binary targets.
       """,
+    version: "0.1.0",
     subcommands: [Build.self, List.self, Generate.self, Use.self],
     defaultSubcommand: Build.self
   )

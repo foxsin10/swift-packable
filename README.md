@@ -41,7 +41,7 @@ The whole pipeline is built on Swift Package Manager's own capabilities:
 git clone <this repository> Packable
 cd Packable
 swift build -c release
-.build/release/swift-packable --help
+.build/release/swift-packable --version   # prints the tool version, e.g. 0.1.0
 ```
 
 To put the command on your PATH, either install it with SwiftPM:
@@ -125,6 +125,7 @@ A client package can declare in `packable.yml` which dependencies it builds from
 
 ```yaml
 # packable.yml, next to the client's Package.swift
+cache: .packable-cache                    # optional; default ~/Library/Caches/packable
 dependencies:
   ShowcaseKit:
     mode: binary                          # source (default) | binary
@@ -133,7 +134,54 @@ dependencies:
     linkage: dynamic                      # static (default) | dynamic, for on-demand builds
   Alamofire:
     source: { url: https://github.com/Alamofire/Alamofire.git, from: 5.9.0 }
+  Logging:
+    mode: binary
+    source: { url: https://github.com/apple/swift-log.git, exact: 1.6.1 }
+    products: [Logging]
+    platforms: [ios, ios-simulator]
 ```
+
+### `packable.yml` reference
+
+Relative paths are resolved against the directory that holds `packable.yml`.
+
+Top level:
+
+| Key | Required | Description |
+|---|---|---|
+| `dependencies` | yes | Map of dependency name → dependency entry. The name is what `use` and `packable("<name>", …)` refer to. |
+| `cache` | no | Directory for binaries built on demand. Default: `$PACKABLE_CACHE`, else `~/Library/Caches/packable`. The default cache is written into `Package.swift` through `$HOME`, so it works on every machine. A custom `cache:` is written as a path relative to the package. |
+
+Dependency entry:
+
+| Key | Required | Default | Description |
+|---|---|---|---|
+| `mode` | no | `source` | `source` builds from `source:`; `binary` links XCFrameworks. Flip it with `swift-packable use`. |
+| `source` | yes | — | Where the source package lives (a [location](#locations)). |
+| `binary` | no | built on demand | A prebuilt binary package (a [location](#locations)). Without it, binary mode packages `source` and caches the result. |
+| `products` | no | all library products | Products to package when building on demand. |
+| `platforms` | no | the source manifest's platforms | Slices to build on demand: `macos`, `maccatalyst`, `ios`, `ios-simulator`, `tvos`, `tvos-simulator`, `watchos`, `watchos-simulator`, `visionos`, `visionos-simulator`. SDK names (`iphoneos`, `iphonesimulator`, `appletvos`, `appletvsimulator`, `watchsimulator`, `xros`, `xrsimulator`) also work. A manifest with no `platforms:` builds macOS + iOS. |
+| `linkage` | no | `static` | `static` or `dynamic` frameworks when building on demand. The two are cached separately. |
+| `skip-interface-verification` | no | `false` | Skip `.swiftinterface` verification when building on demand. |
+
+`products`, `platforms`, `linkage` and `skip-interface-verification` only apply to binaries built on demand. A declared `binary:` is used as it is.
+
+#### Locations
+
+A location is either a local path or a URL with exactly one version requirement:
+
+| Key | Example | `Package.swift` equivalent |
+|---|---|---|
+| `path` | `{ path: ../ShowcaseKit }` | `.package(path: "../ShowcaseKit")` |
+| `url` + `from` | `{ url: https://…, from: 1.2.0 }` | `.package(url: …, from: "1.2.0")` |
+| `url` + `exact` | `{ url: https://…, exact: 1.2.0 }` | `.package(url: …, exact: "1.2.0")` |
+| `url` + `up-to-next-minor` | `{ url: https://…, up-to-next-minor: 1.2.0 }` | `.package(url: …, .upToNextMinor(from: "1.2.0"))` |
+| `url` + `branch` | `{ url: https://…, branch: main }` | `.package(url: …, branch: "main")` |
+| `url` + `revision` | `{ url: https://…, revision: 4f2c1e0 }` | `.package(url: …, revision: "4f2c1e0")` |
+
+A `path` takes no version requirement, and a `url` needs exactly one. Anything else fails validation. The package name used in `.product(name:package:)` is the last path component, without `.git`.
+
+### Commands
 
 ```bash
 swift-packable generate                  # write the dependency block into Package.swift
@@ -158,8 +206,6 @@ Where binaries come from:
 - **Declared:** `binary:` points at a binary package, either one this tool generated or a released one at a URL.
 - **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in `~/Library/Caches/packable` (override with `cache:` in `packable.yml` or `$PACKABLE_CACHE`). Local sources are rebuilt only when their files change. Remote sources are resolved by SwiftPM and cached per version. The manifest refers to the shared cache through `$HOME`, so the same `Package.swift` works on every machine; run `generate` after cloning to fill the cache.
 
-Per-dependency keys for on-demand builds: `products`, `platforms`, `linkage`, `skip-interface-verification`. Static and dynamic builds of the same version are cached separately.
-
 Checks:
 
 - **Clean switch:** `use` clears `.build` (keeping checkouts, downloads, the lock file and sourcekit-lsp's `index-build`), because objects left from the other mode break linking. If another SwiftPM process holds the package's lock, the clean is skipped with a warning. In Xcode, also run Product › Clean Build Folder.
@@ -169,7 +215,7 @@ Checks:
 
 ## Dynamic frameworks
 
-With `--linkage dynamic` (or `linkage: dynamic` in `packable.yml`), each module is still its own XCFramework, but its binary is a dylib:
+With `--linkage dynamic` (or `linkage: dynamic` on a `packable.yml` dependency), each module is still its own XCFramework, but its binary is a dylib:
 
 - **Linked against its dependencies.** A module links the frameworks of the modules it depends on (taken from the manifests, so they are built first) and the `linkedFramework`/`linkedLibrary` entries of its `linkerSettings:`. Each loads the others through `@rpath`, so an app embeds them all side by side in `Frameworks/`. Xcode does this automatically for binary targets.
 - **Resources stay inside the framework.** The resource bundle ships in the framework, where `Bundle.module` finds it, so the generated `Package.swift` has no carrier targets.
