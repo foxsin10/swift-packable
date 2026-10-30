@@ -21,6 +21,7 @@ public struct BuiltModule: Sendable {
 /// Library targets of all packages in the graph, keyed by module name.
 public struct TargetIndex: Sendable {
   public init(packages: [ResolvedPackage]) {
+    self.packages = packages
     for package in packages {
       for target in package.manifest.targets where target.isLibrary {
         entries[moduleName(forTarget: target.name)] = Entry(
@@ -37,6 +38,70 @@ public struct TargetIndex: Sendable {
   }
 
   public private(set) var entries: [String: Entry] = [:]
+
+  /// Library modules that `module` lists in `dependencies:`, with products expanded to
+  /// their targets.
+  public func directDependencies(of module: String) -> [String] {
+    guard let entry = entries[module] else {
+      return []
+    }
+    let manifest = entry.package.manifest
+    let targets: [String] = entry.target.targetDependencies.flatMap { dependency in
+      switch dependency {
+      case let .target(name):
+        return [name]
+      case let .byName(name):
+        if manifest.target(named: name) != nil {
+          return [name]
+        }
+        return packages.lazy.compactMap { $0.manifest.product(named: name)?.targets }
+          .first ?? []
+      case let .product(name, packageName):
+        let package = packages.first { package in
+          packageName.map {
+            package.identity == $0.lowercased() || package.manifest.name == $0
+          } ?? (package.manifest.product(named: name) != nil)
+        }
+        return package?.manifest.product(named: name)?.targets ?? []
+      }
+    }
+    var seen = Set<String>()
+    return targets.map(moduleName(forTarget:))
+      .filter { entries[$0] != nil && seen.insert($0).inserted }
+  }
+
+  /// `modules` ordered so that each comes after the modules it depends on (directly or
+  /// through modules outside the list), each paired with those dependencies.
+  public func linkOrder(of modules: some Collection<String>)
+    -> [(module: String, dependencies: [String])] {
+    let wanted = Set(modules)
+    var closures: [String: Set<String>] = [:]
+    var ordered: [(module: String, dependencies: [String])] = []
+
+    // Depth-first; SwiftPM rejects dependency cycles, so none are expected here.
+    func visit(_ module: String) -> Set<String> {
+      if let closure = closures[module] {
+        return closure
+      }
+      closures[module] = [] // guards against a cycle in a malformed graph
+      var closure = Set<String>()
+      for dependency in directDependencies(of: module) {
+        closure.insert(dependency)
+        closure.formUnion(visit(dependency))
+      }
+      closures[module] = closure
+      if wanted.contains(module) {
+        ordered.append((module, closure.intersection(wanted).sorted()))
+      }
+      return closure
+    }
+    for module in wanted.sorted() {
+      _ = visit(module)
+    }
+    return ordered
+  }
+
+  let packages: [ResolvedPackage]
 }
 
 /// Reads the products directory of a `swift build` run that used the Swift Build engine.

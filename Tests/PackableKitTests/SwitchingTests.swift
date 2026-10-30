@@ -1,6 +1,6 @@
 import Foundation
+@testable import PackableKit
 import Testing
-@testable import XcframeworkPackableKit
 
 struct PackableConfigTests {
   @Test func parsesModesLocationsAndDefaults() throws {
@@ -13,6 +13,7 @@ struct PackableConfigTests {
           products: [Kit]
           platforms: [ios, ios-simulator]
           skip-interface-verification: true
+          linkage: dynamic
         Remote:
           source: { url: https://github.com/org/Remote.git, up-to-next-minor: 2.1.0 }
       """)
@@ -22,8 +23,10 @@ struct PackableConfigTests {
     #expect(kit.binary?.packageName == "kit-binary")
     #expect(kit.products == ["Kit"])
     #expect(kit.skipInterfaceVerification)
+    #expect(kit.linkage == .dynamic)
     let remote = try #require(config.dependencies["Remote"])
     #expect(remote.mode == .source)
+    #expect(remote.linkage == .static)
     #expect(remote.source.packageName == "Remote")
     #expect(remote.source.requirementArguments == ".upToNextMinor(from: \"2.1.0\")")
   }
@@ -104,7 +107,7 @@ struct ManifestBlockTests {
     #expect(block.contains("// Kit: binary, Remote: source"))
     #expect(block
       .contains(
-        "let packableCache = Context.environment[\"XCFRAMEWORK_PACKABLE_CACHE\"]"
+        "let packableCache = Context.environment[\"PACKABLE_CACHE\"]"
       ))
     #expect(block.contains("  .package(path: packableCache + \"/Kit/local/Kit-binary\")"))
     #expect(block.contains("    \"Kit\": \"Kit-binary\""))

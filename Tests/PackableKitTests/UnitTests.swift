@@ -1,6 +1,6 @@
 import Foundation
+@testable import PackableKit
 import Testing
-@testable import XcframeworkPackableKit
 
 private func platforms(_ json: String) throws -> [PackageManifest.Platform] {
   try JSONDecoder().decode([PackageManifest.Platform].self, from: Data(json.utf8))
@@ -363,9 +363,104 @@ struct PackageMetadataTests {
   }
 }
 
+struct DynamicLinkingTests {
+  @Test func resolvesTargetAndProductDependencies() throws {
+    let index = try index()
+    #expect(index.directDependencies(of: "Kit") == ["KitCore", "Remote"])
+    #expect(index.directDependencies(of: "kit_tool") == ["KitCore"])
+    #expect(index.directDependencies(of: "RemoteCore") == [])
+  }
+
+  @Test func ordersDependenciesFirstWithTransitiveClosure() throws {
+    let order = try index().linkOrder(of: ["Kit", "KitCore", "Remote", "RemoteCore"])
+    #expect(order.map(\.module) == ["KitCore", "RemoteCore", "Remote", "Kit"])
+    #expect(order.last?.dependencies == ["KitCore", "Remote", "RemoteCore"])
+  }
+
+  @Test func reachesDependenciesThroughModulesNotBuilt() throws {
+    // Remote wasn't built for this platform; Kit still links RemoteCore.
+    let order = try index().linkOrder(of: ["Kit", "RemoteCore"])
+    #expect(order.map(\.module) == ["RemoteCore", "Kit"])
+    #expect(order.last?.dependencies == ["RemoteCore"])
+  }
+
+  @Test func readsLinkedFrameworksAndLibrariesPerPlatform() throws {
+    let kit = try #require(index().entries["Kit"]?.target)
+    #expect(kit.linkedLibraries.count == 2)
+    let ios = kit.linkedLibraries.flatMap { $0.arguments(for: .iOSSimulator) }
+    #expect(ios == ["-framework", "UIKit", "-lz"])
+    #expect(kit.linkedLibraries.flatMap { $0.arguments(for: .macOS) } == ["-lz"])
+  }
+
+  @Test func minimumOSVersionOnlyOutsideMacOS() throws {
+    let assembler = FrameworkAssembler(
+      shell: Shell(),
+      bundleIdentifierPrefix: "test",
+      version: "1.0.0",
+      linkage: .dynamic
+    )
+    func plist(_ platform: ApplePlatform) throws -> [String: Any] {
+      let data = try assembler.infoPlist(
+        for: "Kit",
+        platform: platform,
+        minimumOSVersion: "15.0"
+      )
+      return try #require(
+        PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+      )
+    }
+    #expect(try plist(.iOS)["MinimumOSVersion"] as? String == "15.0")
+    #expect(try plist(.macOS)["MinimumOSVersion"] == nil)
+  }
+
+  @Test func passesOnlyLinkerFlagsToTheDylibLink() {
+    let maker = Maker(options: MakerOptions(
+      packageDirectory: URL(fileURLWithPath: "/p"),
+      outputDirectory: URL(fileURLWithPath: "/o")
+    ))
+    let arguments = ["-Xswiftc", "-Xlinker", "-Xlinker", "-x", "-Xcc", "-DX"]
+    #expect(maker.linkerFlags(in: arguments) == ["-Xlinker", "-x"])
+  }
+
+  /// Kit depends on KitCore and on Remote's `RemoteLib` product, which pulls in
+  /// RemoteCore; KitTool is a plain dependency of nothing.
+  private func index() throws -> TargetIndex {
+    let kit = #"""
+      {"name":"Kit","platforms":[],
+       "products":[{"name":"Kit","targets":["Kit"],"type":{"library":["automatic"]}}],
+       "targets":[
+         {"name":"Kit","type":"regular","dependencies":[
+           {"byName":["KitCore",null]},{"product":["RemoteLib","remote",null,null]}],
+          "settings":[
+           {"tool":"linker","kind":{"linkedFramework":{"_0":"UIKit"}},
+            "condition":{"platformNames":["ios"]}},
+           {"tool":"linker","kind":{"linkedLibrary":{"_0":"z"}}},
+           {"tool":"linker","kind":{"unsafeFlags":{"_0":["-Wl,-x"]}}},
+           {"tool":"swift","kind":{"define":{"_0":"KIT"}}}]},
+         {"name":"KitCore","type":"regular","dependencies":[]},
+         {"name":"kit-tool","type":"regular","dependencies":[{"target":["KitCore",null]}]}]}
+      """#
+    let remote = #"""
+      {"name":"Remote","platforms":[],
+       "products":[{"name":"RemoteLib","targets":["Remote"],"type":{"library":["automatic"]}}],
+       "targets":[
+         {"name":"Remote","type":"regular","dependencies":[{"byName":["RemoteCore",null]}]},
+         {"name":"RemoteCore","type":"regular"}]}
+      """#
+    func package(_ identity: String, _ json: String) throws -> ResolvedPackage {
+      try ResolvedPackage(
+        identity: identity,
+        directory: URL(fileURLWithPath: "/\(identity)"),
+        manifest: JSONDecoder().decode(PackageManifest.self, from: Data(json.utf8))
+      )
+    }
+    return try TargetIndex(packages: [package("kit", kit), package("remote", remote)])
+  }
+}
+
 func temporaryDirectory() throws -> URL {
   let url = FileManager.default.temporaryDirectory
-    .appendingPathComponent("xcframework-packable-tests-\(UUID().uuidString)")
+    .appendingPathComponent("packable-tests-\(UUID().uuidString)")
   try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
   return url
 }

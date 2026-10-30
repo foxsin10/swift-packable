@@ -231,8 +231,8 @@ public struct DependencySwitcher: Sendable {
       return CacheLocation(url: absoluteURL(cache), isShared: false)
     }
     let environment = ProcessInfo.processInfo.environment
-    let path = environment["XCFRAMEWORK_PACKABLE_CACHE"]
-      ?? NSHomeDirectory() + "/Library/Caches/xcframework-packable"
+    let path = environment["PACKABLE_CACHE"]
+      ?? NSHomeDirectory() + "/Library/Caches/packable"
     return CacheLocation(
       url: URL(fileURLWithPath: path).standardizedFileURL,
       isShared: true
@@ -248,11 +248,14 @@ public struct DependencySwitcher: Sendable {
     cache: CacheLocation
   ) throws -> URL {
     let root = cache.url.appendingPathComponent(name)
+    // Static and dynamic builds of one version are kept apart, since projects sharing the
+    // cache may want different ones.
+    let variant = dependency.linkage == .static ? "" : "-\(dependency.linkage.rawValue)"
 
     if let path = dependency.source.path {
       let source = absoluteURL(path)
       let fingerprint = sourceFingerprint(of: source)
-      let output = root.appendingPathComponent("local/\(name)-binary")
+      let output = root.appendingPathComponent("local\(variant)/\(name)-binary")
       if !options.rebuild, BinaryMetadata.read(from: output)?.fingerprint == fingerprint {
         log("▸ \(name): binary is up to date (\(output.path))")
         return output
@@ -261,7 +264,7 @@ public struct DependencySwitcher: Sendable {
       try package(
         source: source,
         into: output,
-        scratch: root.appendingPathComponent("local/scratch"),
+        scratch: root.appendingPathComponent("local\(variant)/scratch"),
         dependency: dependency,
         fingerprint: fingerprint
       )
@@ -273,13 +276,13 @@ public struct DependencySwitcher: Sendable {
       location: dependency.source,
       root: root
     )
-    let output = root.appendingPathComponent("\(key)/\(name)-binary")
+    let output = root.appendingPathComponent("\(key)\(variant)/\(name)-binary")
     if !options.rebuild, BinaryMetadata.read(from: output) != nil {
       log("▸ \(name) \(key): using cached binary (\(output.path))")
       return output
     }
     log("▸ \(name) \(key): building binary")
-    let scratch = root.appendingPathComponent("\(key)/scratch")
+    let scratch = root.appendingPathComponent("\(key)\(variant)/scratch")
     try package(source: checkout, into: output, scratch: scratch, dependency: dependency)
     try? FileManager.default.removeItem(at: scratch)
     return output
@@ -301,7 +304,7 @@ public struct DependencySwitcher: Sendable {
       // swift-tools-version:5.9
       import PackageDescription
 
-      // Used by xcframework-packable to resolve \(name)'s source.
+      // Used by swift-packable to resolve \(name)'s source.
       let package = Package(
         name: "packable-resolver",
         dependencies: [\(expression(for: location))],
@@ -352,6 +355,7 @@ public struct DependencySwitcher: Sendable {
       return platform
     }
     options.verifyModuleInterfaces = !dependency.skipInterfaceVerification
+    options.linkage = dependency.linkage
     options.sourceFingerprint = fingerprint
     options.verbose = self.options.verbose
     let log = log

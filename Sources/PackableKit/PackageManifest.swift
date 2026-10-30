@@ -62,6 +62,62 @@ public struct PackageManifest: Decodable, Sendable {
     }
   }
 
+  /// A target's entry in `dependencies:`. Platform conditions aren't kept: a dependency
+  /// that doesn't apply to a platform isn't built for it.
+  public enum Dependency: Decodable, Sendable, Equatable {
+    /// A plain string: a target of the same package, or else a product of a dependency.
+    case byName(String)
+    case target(String)
+    case product(name: String, package: String?)
+
+    public init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: Kind.self)
+      guard let kind = container.allKeys.first else {
+        throw DecodingError.dataCorrupted(.init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Empty target dependency"
+        ))
+      }
+      var values = try container.nestedUnkeyedContainer(forKey: kind)
+      let name = try values.decode(String.self)
+      switch kind {
+      case .byName: self = .byName(name)
+      case .target: self = .target(name)
+      case .product: self = try .product(name: name, package: values.decode(String?.self))
+      }
+    }
+
+    enum Kind: String, CodingKey {
+      case byName
+      case target
+      case product
+    }
+  }
+
+  /// A `linkerSettings:` entry that names a framework or library to link.
+  public struct LinkedLibrary: Sendable, Equatable {
+    public enum Kind: Sendable {
+      case framework
+      case library
+    }
+
+    public let kind: Kind
+    public let name: String
+    /// Manifest platform names (`ios`, `macos`, ...) it's limited to; `nil` means all.
+    public let platformNames: [String]?
+
+    /// The linker arguments for this entry on `platform`, if it applies there.
+    public func arguments(for platform: ApplePlatform) -> [String] {
+      if let platformNames, !platformNames.contains(platform.manifestPlatformName) {
+        return []
+      }
+      return switch kind {
+      case .framework: ["-framework", name]
+      case .library: ["-l\(name)"]
+      }
+    }
+  }
+
   public struct Target: Decodable, Sendable {
     public let name: String
     public let type: String
@@ -77,6 +133,18 @@ public struct PackageManifest: Decodable, Sendable {
     public var isLibrary: Bool {
       type == "regular"
     }
+
+    public var targetDependencies: [Dependency] {
+      dependencies ?? []
+    }
+
+    /// Frameworks and libraries from `linkerSettings:`.
+    public var linkedLibraries: [LinkedLibrary] {
+      (settings ?? []).compactMap(\.linkedLibrary)
+    }
+
+    let dependencies: [Dependency]?
+    let settings: [Setting]?
   }
 
   public let name: String
@@ -91,6 +159,61 @@ public struct PackageManifest: Decodable, Sendable {
 
   public func product(named name: String) -> Product? {
     products.first { $0.name == name }
+  }
+
+  public func target(named name: String) -> Target? {
+    targets.first { $0.name == name }
+  }
+
+  /// A `settings` entry of `dump-package`; only linked frameworks and libraries are read.
+  struct Setting: Decodable, Sendable {
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      let tool = try container.decode(String.self, forKey: .tool)
+      let kind = try container.decode([String: AnyValue].self, forKey: .kind)
+      let condition = try container.decodeIfPresent(Condition.self, forKey: .condition)
+      guard tool == "linker", let (key, value) = kind.first, let name = value.name else {
+        linkedLibrary = nil
+        return
+      }
+      linkedLibrary = switch key {
+      case "linkedFramework":
+        LinkedLibrary(
+          kind: .framework,
+          name: name,
+          platformNames: condition?.platformNames
+        )
+      case "linkedLibrary":
+        LinkedLibrary(kind: .library, name: name, platformNames: condition?.platformNames)
+      default: nil
+      }
+    }
+
+    enum CodingKeys: String, CodingKey {
+      case tool
+      case kind
+      case condition
+    }
+
+    struct Condition: Decodable {
+      let platformNames: [String]?
+    }
+
+    /// `{"_0": "UIKit"}`, or another shape whose contents aren't needed.
+    struct AnyValue: Decodable {
+      init(from decoder: Decoder) throws {
+        let container = try? decoder.container(keyedBy: CodingKeys.self)
+        name = try? container?.decodeIfPresent(String.self, forKey: ._0)
+      }
+
+      enum CodingKeys: String, CodingKey {
+        case _0
+      }
+
+      let name: String?
+    }
+
+    let linkedLibrary: LinkedLibrary?
   }
 }
 

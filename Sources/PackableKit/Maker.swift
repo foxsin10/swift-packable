@@ -8,7 +8,7 @@ public struct MakerOptions: Sendable {
 
   public var packageDirectory: URL
   public var outputDirectory: URL
-  /// Defaults to `<package>/.build/xcframework-packable`.
+  /// Defaults to `<package>/.build/packable`.
   public var scratchDirectory: URL?
   /// Library products to package. Empty means every library product of the root package.
   public var products: [String] = []
@@ -18,6 +18,8 @@ public struct MakerOptions: Sendable {
   /// Deployment target overrides keyed by manifest platform name (`ios`, `macos`, ...).
   public var deploymentTargets: [String: String] = [:]
   public var configuration: String = "release"
+  /// Whether modules are packaged as static or dynamic frameworks.
+  public var linkage: Linkage = .static
   public var verifyModuleInterfaces: Bool = true
   /// `xcodebuild -create-xcframework` drops compiled `.swiftmodule` files and keeps only
   /// interfaces. When true they're put back, so clients on the same compiler can import a
@@ -29,7 +31,7 @@ public struct MakerOptions: Sendable {
   /// When set together with `zip`, the generated manifest points at
   /// `<baseURL>/<Module>.xcframework.zip`.
   public var baseURL: String?
-  public var bundleIdentifierPrefix: String = "xcframework-packable"
+  public var bundleIdentifierPrefix: String = "packable"
   public var version: String = "1.0.0"
   public var verbose: Bool = false
   /// Recorded in `packable-metadata.json`; set when building on demand from a local path.
@@ -85,7 +87,9 @@ public struct Maker: Sendable {
     let assembler = FrameworkAssembler(
       shell: shell,
       bundleIdentifierPrefix: options.bundleIdentifierPrefix,
-      version: options.version
+      version: options.version,
+      linkage: options.linkage,
+      extraLinkerArguments: linkerFlags(in: options.extraBuildArguments)
     )
     let staging = scratchDirectory.appendingPathComponent("frameworks")
     try? fileManager.removeItem(at: staging)
@@ -158,7 +162,9 @@ public struct Maker: Sendable {
         }
       }
 
-      for (name, byArchitecture) in snapshots.sorted(by: { $0.key < $1.key }) {
+      // Dependencies first: a dynamic framework links against the ones it uses.
+      for (name, dependencies) in index.linkOrder(of: snapshots.keys) {
+        let byArchitecture = snapshots[name] ?? [:]
         let slices = architectures.compactMap { byArchitecture[$0] }
         if slices.count != architectures.count {
           result.warnings
@@ -170,10 +176,13 @@ public struct Maker: Sendable {
           slices,
           into: platformStaging.appendingPathComponent("universal/\(name)")
         )
+        let linkedLibraries = index.entries[name]?.target.linkedLibraries ?? []
         frameworks[name, default: [:]][platform] = try assembler.assemble(
           universal,
           platform: platform,
-          in: platformStaging
+          in: platformStaging,
+          dependencies: dependencies,
+          linkerArguments: linkedLibraries.flatMap { $0.arguments(for: platform) }
         )
       }
     }
@@ -198,7 +207,12 @@ public struct Maker: Sendable {
     for (module, slices) in frameworks.sorted(by: { $0.key < $1.key }) {
       log("▸ Creating \(module).xcframework")
       let xcframework = artifactsDirectory.appendingPathComponent("\(module).xcframework")
-      let inputs = platforms.compactMap { slices[$0] }.flatMap { ["-framework", $0.path] }
+      let inputs = platforms.compactMap { slices[$0] }.flatMap { framework in
+        let dSYM = FrameworkAssembler.debugSymbols(of: framework)
+        let hasDSYM = fileManager.fileExists(atPath: dSYM.path)
+        return ["-framework", framework.path] +
+          (hasDSYM ? ["-debug-symbols", dSYM.path] : [])
+      }
       let create = ["xcodebuild", "-create-xcframework"] + inputs
       try shell.run(create + ["-output", xcframework.path], stream: false)
       if options.includeBinarySwiftModules || !options.verifyModuleInterfaces {
@@ -249,16 +263,18 @@ public struct Maker: Sendable {
       )
     }
 
-    // Modules with resources get a carrier target, so SwiftPM installs their bundles.
+    // Static modules with resources get a carrier target, so SwiftPM installs their
+    // bundles. A dynamic framework is embedded with its bundle, where `Bundle.module`
+    // finds it.
     let carriersDirectory = options.outputDirectory
       .appendingPathComponent(ResourceCarrier.folder)
     try? fileManager.removeItem(at: carriersDirectory)
     var carriers: [ResourceCarrier] = []
     var localizations: [String] = []
     // SwiftPM's resolved resources for the root package; dependencies use a scan.
-    let described = resourceBundles
-      .isEmpty ? [:] : (try? swiftPM.describeResources()) ?? [:]
-    for (module, bundle) in resourceBundles.sorted(by: { $0.key < $1.key }) {
+    let carried = options.linkage == .static ? resourceBundles : [:]
+    let described = carried.isEmpty ? [:] : (try? swiftPM.describeResources()) ?? [:]
+    for (module, bundle) in carried.sorted(by: { $0.key < $1.key }) {
       guard let entry = index.entries[module] else {
         continue
       }
@@ -298,6 +314,7 @@ public struct Maker: Sendable {
       version: git.version,
       revision: git.revision,
       fingerprint: options.sourceFingerprint,
+      linkage: options.linkage,
       modules: frameworks.keys.sorted(),
       products: result.products.reduce(into: [:]) { $0[$1.name] = $1.modules }
     ).write(to: options.outputDirectory)
@@ -312,7 +329,7 @@ public struct Maker: Sendable {
 
   var scratchDirectory: URL {
     options.scratchDirectory ?? options.packageDirectory
-      .appendingPathComponent(".build/xcframework-packable")
+      .appendingPathComponent(".build/packable")
   }
 
   func swiftPM() -> SwiftPM {
@@ -321,6 +338,14 @@ public struct Maker: Sendable {
       scratchDirectory: scratchDirectory,
       shell: shell
     )
+  }
+
+  /// The `-Xlinker` pairs of `swift build` arguments (which come in `-X<tool> value`
+  /// pairs).
+  func linkerFlags(in arguments: [String]) -> [String] {
+    stride(from: 0, to: arguments.count - 1, by: 2)
+      .filter { arguments[$0] == "-Xlinker" }
+      .flatMap { [arguments[$0], arguments[$0 + 1]] }
   }
 
   func selectedProducts(of manifest: PackageManifest) throws -> [String] {

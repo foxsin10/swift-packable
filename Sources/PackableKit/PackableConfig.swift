@@ -10,6 +10,8 @@ import Yams
 ///     mode: binary                      # source (default) | binary
 ///     source: { path: ../ShowcaseKit }  # or { url: …, from: 1.2.0 }
 ///     binary: { path: ../ShowcaseKit-binary }  # optional; built on demand when missing
+///     linkage: dynamic                  # static (default) | dynamic, for on-demand
+/// builds
 /// ```
 public struct PackableConfig: Decodable, Sendable {
   public enum Mode: String, Decodable, Sendable, CaseIterable {
@@ -108,6 +110,7 @@ public struct PackableConfig: Decodable, Sendable {
       binary = try container.decodeIfPresent(Location.self, forKey: .binary)
       products = try container.decodeIfPresent([String].self, forKey: .products)
       platforms = try container.decodeIfPresent([String].self, forKey: .platforms)
+      linkage = try container.decodeIfPresent(Linkage.self, forKey: .linkage) ?? .static
       skipInterfaceVerification = try container.decodeIfPresent(
         Bool.self,
         forKey: .skipInterfaceVerification
@@ -122,6 +125,8 @@ public struct PackableConfig: Decodable, Sendable {
     public var products: [String]?
     /// Platform slices to build on demand. Default: the source manifest's platforms.
     public var platforms: [String]?
+    /// Framework linkage when building on demand.
+    public var linkage: Linkage
     public var skipInterfaceVerification: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -130,13 +135,14 @@ public struct PackableConfig: Decodable, Sendable {
       case binary
       case products
       case platforms
+      case linkage
       case skipInterfaceVerification = "skip-interface-verification"
     }
   }
 
   public var dependencies: [String: Dependency]
   /// Where binaries built on demand are kept. Default: the shared cache in
-  /// `~/Library/Caches/xcframework-packable` (or `$XCFRAMEWORK_PACKABLE_CACHE`).
+  /// `~/Library/Caches/packable` (or `$PACKABLE_CACHE`).
   public var cache: String?
 
   /// Dependency names in a stable order.

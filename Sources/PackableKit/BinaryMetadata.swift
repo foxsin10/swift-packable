@@ -14,6 +14,9 @@ public struct BinaryMetadata: Codable, Sendable, Equatable {
   public var revision: String?
   /// Fingerprint of the source files, for binaries built on demand from a local path.
   public var fingerprint: String?
+  /// How the frameworks link; `nil` in metadata written before dynamic frameworks, which
+  /// were all static.
+  public var linkage: Linkage?
   /// Every module packaged as an XCFramework.
   public var modules: [String]
   /// Product name → modules it links.

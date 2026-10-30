@@ -1,6 +1,6 @@
 import ArgumentParser
 import Foundation
-import XcframeworkPackableKit
+import PackableKit
 
 struct SwitchOptions: ParsableArguments {
   @Option(
@@ -74,9 +74,9 @@ struct Use: ParsableCommand {
     abstract: "Switch dependencies between source and binary, then regenerate.",
     discussion: """
       Examples:
-        xcframework-packable use binary ShowcaseKit
-        xcframework-packable use source ShowcaseKit MathUtils
-        xcframework-packable use binary --all
+        swift-packable use binary ShowcaseKit
+        swift-packable use source ShowcaseKit MathUtils
+        swift-packable use binary --all
       """
   )
 
@@ -143,6 +143,9 @@ private func report(_ result: DependencySwitcher.Result) {
       "  \(name)  \(dependency.mode.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))  \(dependency.packageExpression)"
     )
   }
-  print(result
-    .manifestChanged ? "✔ Package.swift updated" : "✔ Package.swift already up to date")
+  print(
+    result.manifestChanged
+        ? "✔ Package.swift updated"
+        : "✔ Package.swift already up to date"
+  )
 }

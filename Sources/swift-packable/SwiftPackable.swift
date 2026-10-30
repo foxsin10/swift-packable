@@ -1,16 +1,17 @@
 import ArgumentParser
 import Foundation
-import XcframeworkPackableKit
+import PackableKit
 
 @main
-struct XcframeworkPackable: ParsableCommand {
+struct SwiftPackable: ParsableCommand {
   static let configuration = CommandConfiguration(
-    commandName: "xcframework-packable",
+    commandName: "swift-packable",
     abstract: "Build a Swift package's library products into XCFrameworks with SwiftPM.",
     discussion: """
-      xcframework-packable compiles every module of the selected products with `swift build` \
+      swift-packable compiles every module of the selected products with `swift build` \
       (one run per platform, with library evolution and module interfaces enabled), \
-      wraps each module in a static framework, merges the platforms with \
+      wraps each module in a static (or, with --linkage dynamic, dynamic) framework, \
+      merges the platforms with \
       `xcodebuild -create-xcframework`, and writes a Package.swift that exposes the \
       results as binary targets.
       """,
@@ -73,6 +74,12 @@ struct Build: ParsableCommand {
   @Option(name: .shortAndLong, help: "Build configuration: release or debug.")
   var configuration: String = "release"
 
+  @Option(help: ArgumentHelp(
+    "Framework linkage: static or dynamic.",
+    discussion: "Dynamic frameworks are embedded in the app and keep their resource bundles inside."
+  ))
+  var linkage: Linkage = .static
+
   @Flag(
     help: "Don't verify emitted module interfaces (needed for some dependencies whose interfaces don't compile)."
   )
@@ -92,7 +99,7 @@ struct Build: ParsableCommand {
   var baseURL: String?
 
   @Option(help: "Prefix for the frameworks' CFBundleIdentifier.")
-  var bundleIdPrefix: String = "xcframework-packable"
+  var bundleIdPrefix: String = "packable"
 
   @Option(
     name: .customLong("framework-version"),
@@ -100,7 +107,7 @@ struct Build: ParsableCommand {
   )
   var frameworkVersion: String = "1.0.0"
 
-  @Option(help: "SwiftPM scratch path. Default: <package>/.build/xcframework-packable.")
+  @Option(help: "SwiftPM scratch path. Default: <package>/.build/packable.")
   var scratchPath: String?
 
   @Option(
@@ -155,6 +162,7 @@ struct Build: ParsableCommand {
     options.deploymentTargets = targets
       .reduce(into: [:]) { $0[$1.key.lowercased()] = $1.value }
     options.configuration = configuration
+    options.linkage = linkage
     options.verifyModuleInterfaces = !skipInterfaceVerification
     options.includeBinarySwiftModules = includeBinarySwiftmodules
     options.extraBuildArguments = swiftcFlags.flatMap { ["-Xswiftc", $0] }
@@ -230,7 +238,7 @@ struct Build: ParsableCommand {
 struct List: ParsableCommand {
   static let configuration =
     CommandConfiguration(
-      abstract: "Show the library products, targets and platforms xcframework-packable would build."
+      abstract: "Show the library products, targets and platforms swift-packable would build."
     )
 
   @OptionGroup var location: PackageLocation
@@ -265,8 +273,10 @@ struct List: ParsableCommand {
   }
 }
 
+extension Linkage: ExpressibleByArgument {}
+
 /// Prints a tool error (often multi-line build output) and exits with a failure status.
 func fail(_ error: Error) -> Never {
   FileHandle.standardError.write(Data("error: \(error)\n".utf8))
-  XcframeworkPackable.exit(withError: ExitCode.failure)
+  SwiftPackable.exit(withError: ExitCode.failure)
 }

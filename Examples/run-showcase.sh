@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Walks through xcframework-packable's main use cases on the example packages.
+# Walks through swift-packable's main use cases on the example packages.
 # Usage: Examples/run-showcase.sh   (outputs go to Examples/build)
 set -euo pipefail
 
 EXAMPLES="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$EXAMPLES")"
 BUILD="$EXAMPLES/build"
-TOOL="$ROOT/.build/release/xcframework-packable"
+TOOL="$ROOT/.build/release/swift-packable"
 KIT="$EXAMPLES/ShowcaseKit"
 APP="$EXAMPLES/ShowcaseApp"
 
 step() { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 run() { printf '\033[2m$ %s\033[0m\n' "$*"; "$@"; }
 
-step "0. Build xcframework-packable"
+step "0. Build swift-packable"
 run swift build -c release --package-path "$ROOT"
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
@@ -45,7 +45,7 @@ cat "$BUILD/ShowcaseKit-release/Package.swift"
 step "6. Switch a dependency between source and binary with packable.yml"
 SWITCH="$EXAMPLES/SwitchableApp"
 # Keep this example's binary cache under Examples/build instead of ~/Library/Caches.
-export XCFRAMEWORK_PACKABLE_CACHE="$BUILD/packable-cache"
+export PACKABLE_CACHE="$BUILD/packable-cache"
 run cat "$SWITCH/packable.yml"
 run "$TOOL" generate --package-path "$SWITCH"
 run swift run --package-path "$SWITCH" SwitchableApp

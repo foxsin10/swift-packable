@@ -1,6 +1,6 @@
 # Examples
 
-Showcase of `xcframework-packable` on a small library, with a client app that uses the
+Showcase of `swift-packable` on a small library, with a client app that uses the
 result. Everything runs offline.
 
 ```bash
@@ -28,9 +28,9 @@ Examples/run-showcase.sh      # ~2.5 min; outputs go to Examples/build/
 
 ## What the script shows
 
-1. **Inspect** the package: `xcframework-packable list Examples/ShowcaseKit`
+1. **Inspect** the package: `swift-packable list Examples/ShowcaseKit`
 2. **Package everything** for the manifest's platforms (macOS, iOS, iOS Simulator):
-   `xcframework-packable Examples/ShowcaseKit -o Examples/build/ShowcaseKit-binary`
+   `swift-packable Examples/ShowcaseKit -o Examples/build/ShowcaseKit-binary`
    This produces 5 XCFrameworks (one per module) and a `Package.swift` with both products as binary targets.
 3. **Consume the binaries**: `ShowcaseApp` is built and run on macOS, then built for the iOS Simulator.
    Its `import ShowcaseKit` / `import ShowcaseStats` are the same as with the source package.
@@ -45,11 +45,11 @@ Examples/run-showcase.sh      # ~2.5 min; outputs go to Examples/build/
      stats: count=8 mean=5.0 sd=2.0
    ```
 4. **Narrow the build**: one product, one platform, one architecture:
-   `xcframework-packable Examples/ShowcaseKit -p ShowcaseStats --platform macos --arch macos=arm64`
+   `swift-packable Examples/ShowcaseKit -p ShowcaseStats --platform macos --arch macos=arm64`
 5. **Release**: zipped XCFrameworks, SwiftPM checksums, and a `Package.swift` pointing at a hosting URL:
-   `xcframework-packable Examples/ShowcaseKit --zip --base-url https://example.com/showcasekit/1.0.0`
+   `swift-packable Examples/ShowcaseKit --zip --base-url https://example.com/showcasekit/1.0.0`
 6. **Switch between source and binary**: `SwitchableApp` runs with ShowcaseKit from source, then
-   `xcframework-packable use binary ShowcaseKit` packages ShowcaseKit on demand (no `binary:`
+   `swift-packable use binary ShowcaseKit` packages ShowcaseKit on demand (no `binary:`
    location is declared) and rewrites the block in `Package.swift`; the app runs the same on the
    binaries. Switching back to source and to binary again reuses the cached binary. The script
    keeps the cache in `Examples/build/packable-cache` and leaves the app in source mode.

@@ -1,5 +1,5 @@
 # Which dependencies SwitchableApp builds from source and which it links as XCFrameworks.
-# Switch with:  xcframework-packable use source|binary ShowcaseKit
+# Switch with:  swift-packable use source|binary ShowcaseKit
 dependencies:
   ShowcaseKit:
     mode: source

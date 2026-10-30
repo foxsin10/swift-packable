@@ -2,28 +2,28 @@
 import PackageDescription
 
 let package = Package(
-  name: "XcframeworkPackable",
+  name: "swift-packable",
   platforms: [.macOS(.v13)],
   products: [
-    .executable(name: "xcframework-packable", targets: ["xcframework-packable"]),
-    .library(name: "XcframeworkPackableKit", targets: ["XcframeworkPackableKit"])
+    .executable(name: "swift-packable", targets: ["swift-packable"]),
+    .library(name: "PackableKit", targets: ["PackableKit"])
   ],
   dependencies: [
-    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
-    .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.0")
+    .package(url: "https://github.com/apple/swift-argument-parser.git", exact: "1.5.0"),
+    .package(url: "https://github.com/jpsim/Yams.git", exact: "6.2.0")
   ],
   targets: [
-    .target(name: "XcframeworkPackableKit", dependencies: ["Yams"]),
+    .target(name: "PackableKit", dependencies: ["Yams"]),
     .executableTarget(
-      name: "xcframework-packable",
+      name: "swift-packable",
       dependencies: [
-        "XcframeworkPackableKit",
+        "PackableKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser")
       ]
     ),
     .testTarget(
-      name: "XcframeworkPackableKitTests",
-      dependencies: ["XcframeworkPackableKit"],
+      name: "PackableKitTests",
+      dependencies: ["PackableKit"],
       resources: [.copy("Fixtures")]
     )
   ]

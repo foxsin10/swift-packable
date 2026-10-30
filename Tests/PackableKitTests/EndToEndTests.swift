@@ -1,12 +1,12 @@
 import Foundation
+@testable import PackableKit
 import Testing
-@testable import XcframeworkPackableKit
 
 /// Packages the `Fixtures/Demo` package with SwiftPM, then builds and runs a client
 /// package that depends on the generated binary package.
 @Suite(.serialized) struct EndToEndTests {
-  @Test(.timeLimit(.minutes(10)))
-  func packagesFixtureAndClientRunsAgainstBinaries() throws {
+  @Test(.timeLimit(.minutes(10)), arguments: Linkage.allCases)
+  func packagesFixtureAndClientRunsAgainstBinaries(linkage: Linkage) throws {
     let work = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: work) }
 
@@ -25,6 +25,7 @@ import Testing
     options.platforms = [.macOS, .iOSSimulator]
     options.architectures = [.macOS: ["arm64", "x86_64"], .iOSSimulator: ["arm64"]]
     options.zip = true
+    options.linkage = linkage
 
     let result = try Maker(options: options, log: { _ in }).run()
 
@@ -36,24 +37,31 @@ import Testing
     #expect(result.checksums.count == 4)
     #expect(result.warnings.isEmpty)
 
-    // DemoExtras has resources: its binary target is renamed, and a carrier target with
-    // the original resource files takes the module's name.
     let binaryPackage = work.appendingPathComponent("DemoBinary")
     let generated = try String(
       contentsOf: binaryPackage.appendingPathComponent("Package.swift"),
       encoding: .utf8
     )
-    #expect(generated
-      .contains(#"targets: ["DemoExtrasBinary", "DemoExtras", "DemoCore"]"#))
-    #expect(generated.contains(#"resources: [.process("Resources/message.txt")]"#))
     let message = binaryPackage
       .appendingPathComponent("Resources/DemoExtras/Resources/message.txt")
-    #expect(FileManager.default.fileExists(atPath: message.path))
+    switch linkage {
+    case .static:
+      // DemoExtras has resources: its binary target is renamed, and a carrier target with
+      // the original resource files takes the module's name.
+      #expect(generated
+        .contains(#"targets: ["DemoExtrasBinary", "DemoExtras", "DemoCore"]"#))
+      #expect(generated.contains(#"resources: [.process("Resources/message.txt")]"#))
+      #expect(FileManager.default.fileExists(atPath: message.path))
+    case .dynamic:
+      // The bundle ships inside the embedded framework, so there's no carrier.
+      #expect(generated.contains(#"targets: ["DemoExtras", "DemoCore"]"#))
+      #expect(!FileManager.default.fileExists(atPath: message.path))
+    }
 
     // Universal macOS slice, merged -Swift.h, framework module map for the C target.
     let shell = Shell()
     let unzipped = work.appendingPathComponent("unzipped")
-    for module in ["Demo", "CDemo"] {
+    for module in ["Demo", "CDemo", "DemoExtras"] {
       try shell.run([
         "ditto",
         "-x",
@@ -70,6 +78,9 @@ import Testing
       demo.appendingPathComponent("Demo").path
     ])
     #expect(Set(archs.split(whereSeparator: \.isWhitespace)) == ["arm64", "x86_64"])
+    if linkage == .dynamic {
+      try expectDynamicFrameworks(in: unzipped, shell: shell)
+    }
     let header = try String(
       contentsOf: demo.appendingPathComponent("Headers/Demo-Swift.h"),
       encoding: .utf8
@@ -123,7 +134,15 @@ import Testing
     )
 
     let scratch = ["--scratch-path", work.appendingPathComponent("client-scratch").path]
-    let output = try shell.run(["swift", "run"] + scratch + ["Client"], in: client)
+    // Under Swift Build, command-line executables get no rpath to the frameworks SwiftPM
+    // copies next to them.
+    let rpath = linkage == .dynamic
+      ? ["-Xlinker", "-rpath", "-Xlinker", "@executable_path"]
+      : []
+    let output = try shell.run(
+      ["swift", "run"] + scratch + rpath + ["Client"],
+      in: client
+    )
     #expect(output.trimmingCharacters(in: .whitespacesAndNewlines)
       .hasSuffix("42 answer=42 82 5\nhello from resources"))
 
@@ -143,6 +162,32 @@ import Testing
       in: client
     )
   }
+}
+
+/// Checks the dynamic slices: dylibs that load their dependencies through `@rpath`,
+/// dSYMs, `MinimumOSVersion`, and resource bundles kept inside the framework.
+private func expectDynamicFrameworks(in unzipped: URL, shell: Shell) throws {
+  let slice = unzipped.appendingPathComponent("Demo.xcframework/macos-arm64_x86_64")
+  let binary = slice.appendingPathComponent("Demo.framework/Demo")
+  #expect(try shell.run(["file", binary.path])
+    .contains("dynamically linked shared library"))
+  let libraries = try shell.run(["otool", "-L", binary.path])
+  #expect(libraries.contains("@rpath/Demo.framework/Versions/A/Demo"))
+  #expect(libraries.contains("@rpath/DemoCore.framework/Versions/A/DemoCore"))
+  #expect(libraries.contains("@rpath/CDemo.framework/Versions/A/CDemo"))
+  let dSYM = slice.appendingPathComponent("dSYMs/Demo.framework.dSYM")
+  #expect(FileManager.default.fileExists(atPath: dSYM.path))
+
+  let simulator = unzipped.appendingPathComponent(
+    "DemoExtras.xcframework/ios-arm64-simulator/DemoExtras.framework"
+  )
+  let plist = try Data(contentsOf: simulator.appendingPathComponent("Info.plist"))
+  let info = try #require(
+    PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any]
+  )
+  #expect(info["MinimumOSVersion"] as? String == "15.0")
+  let bundle = simulator.appendingPathComponent("Demo_DemoExtras.bundle")
+  #expect(FileManager.default.fileExists(atPath: bundle.path))
 }
 
 /// A client switches the `Fixtures/Demo` package between source and an on-demand binary.
