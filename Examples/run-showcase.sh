@@ -44,8 +44,6 @@ cat "$BUILD/ShowcaseKit-release/Package.swift"
 
 step "6. Switch a dependency between source and binary with packable.yml"
 SWITCH="$EXAMPLES/SwitchableApp"
-# Keep this example's binary cache under Examples/build instead of ~/Library/Caches.
-export PACKABLE_CACHE="$BUILD/packable-cache"
 run cat "$SWITCH/packable.yml"
 run "$TOOL" generate --package-path "$SWITCH"
 run swift run --package-path "$SWITCH" SwitchableApp

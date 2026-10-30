@@ -28,7 +28,7 @@ The whole pipeline is built on Swift Package Manager's own capabilities:
 
 - **Tools on PATH:** `swift`, `xcrun`, `xcodebuild`, `libtool`, `lipo`, `ditto` and `git`. All of them ship with macOS and Xcode.
 - **Network:** only for remote dependencies, when SwiftPM resolves a package URL or `generate` builds a remote source on demand. Local packages build offline.
-- **Disk:** binaries built on demand are cached in `~/Library/Caches/packable` (or `$PACKABLE_CACHE`, or `cache:` in `packable.yml`), one copy per dependency version.
+- **Disk:** binaries built on demand are cached in the client package's `.build/packable-cache` (or `cache:` in `packable.yml`), one copy per dependency version.
 
 **For apps that use the output**
 
@@ -125,7 +125,7 @@ A client package can declare in `packable.yml` which dependencies it builds from
 
 ```yaml
 # packable.yml, next to the client's Package.swift
-cache: .packable-cache                    # optional; default ~/Library/Caches/packable
+cache: .packable-cache                    # optional; default .build/packable-cache
 dependencies:
   ShowcaseKit:
     mode: binary                          # source (default) | binary
@@ -150,7 +150,7 @@ Top level:
 | Key | Required | Description |
 |---|---|---|
 | `dependencies` | yes | Map of dependency name → dependency entry. The name is what `use` and `packable("<name>", …)` refer to. |
-| `cache` | no | Directory for binaries built on demand. Default: `$PACKABLE_CACHE`, else `~/Library/Caches/packable`. The default cache is written into `Package.swift` through `$HOME`, so it works on every machine. A custom `cache:` is written as a path relative to the package. |
+| `cache` | no | Directory for binaries built on demand. Default: `.build/packable-cache` in the package (`--package-path`, default the current directory). `Package.swift` refers to it by a path relative to the package. |
 
 Dependency entry:
 
@@ -204,11 +204,11 @@ let package = Package(
 Where binaries come from:
 
 - **Declared:** `binary:` points at a binary package, either one this tool generated or a released one at a URL.
-- **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in `~/Library/Caches/packable` (override with `cache:` in `packable.yml` or `$PACKABLE_CACHE`). Local sources are rebuilt only when their files change. Remote sources are resolved by SwiftPM and cached per version. The manifest refers to the shared cache through `$HOME`, so the same `Package.swift` works on every machine; run `generate` after cloning to fill the cache.
+- **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in the package's `.build/packable-cache` (override with `cache:` in `packable.yml`). Local sources are rebuilt only when their files change. Remote sources are resolved by SwiftPM and cached per version. `.build` isn't committed, so run `generate` after cloning, and after `swift package clean` or `swift package reset` (both delete it), to fill the cache again.
 
 Checks:
 
-- **Clean switch:** `use` clears `.build` (keeping checkouts, downloads, the lock file and sourcekit-lsp's `index-build`), because objects left from the other mode break linking. If another SwiftPM process holds the package's lock, the clean is skipped with a warning. In Xcode, also run Product › Clean Build Folder.
+- **Clean switch:** `use` clears `.build` (keeping checkouts, downloads, the lock file, sourcekit-lsp's `index-build` and `packable-cache`), because objects left from the other mode break linking. If another SwiftPM process holds the package's lock, the clean is skipped with a warning. In Xcode, also run Product › Clean Build Folder.
 - **Duplicate modules:** a binary package bundles its dependencies' modules. If another entry provides one of them, `generate` stops and names the module (for example, MathUtils both bundled in the ShowcaseKit binary and declared on its own).
 - **Version drift:** for declared binaries, `generate` warns when the binary was built from a different tag or commit than the source points at (from `packable-metadata.json`, written next to every generated binary package).
 - **Rollback:** if regenerating fails, `use` restores `packable.yml`.

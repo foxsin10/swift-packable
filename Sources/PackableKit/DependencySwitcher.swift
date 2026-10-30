@@ -75,15 +75,11 @@ public struct DependencySwitcher: Sendable {
           }
         } else {
           let built = try buildOnDemand(name: name, dependency: dependency, cache: cache)
-          let path = cache.isShared
-            ? nil
-            : relativePath(to: built, from: options.packageDirectory)
-          let expression = path.map { ".package(path: \(swiftLiteral($0)))" }
-            ?? ".package(path: packableCache + \(swiftLiteral("/" + relativePath(to: built, from: cache.url))))"
+          let path = relativePath(to: built, from: options.packageDirectory)
           result.dependencies.append(SwitchedDependency(
             name: name,
             mode: .binary,
-            packageExpression: expression,
+            packageExpression: ".package(path: \(swiftLiteral(path)))",
             packageName: built.lastPathComponent
           ))
           modulesByDependency[name] = BinaryMetadata.read(from: built)?.modules
@@ -94,12 +90,7 @@ public struct DependencySwitcher: Sendable {
     let binaries = Set(result.dependencies.filter { $0.mode == .binary }.map(\.name))
     try checkDuplicateModules(modulesByDependency, binaries: binaries)
 
-    let usesSharedCache = cache.isShared && result.dependencies
-      .contains { $0.packageExpression.contains("packableCache") }
-    let block = ManifestBlock.render(
-      result.dependencies,
-      usesSharedCache: usesSharedCache
-    )
+    let block = ManifestBlock.render(result.dependencies)
     let manifestURL = options.packageDirectory.appendingPathComponent("Package.swift")
     let manifest = try String(contentsOf: manifestURL, encoding: .utf8)
     let updated = try ManifestBlock.splice(block, into: manifest)
@@ -165,8 +156,9 @@ public struct DependencySwitcher: Sendable {
   }
 
   /// Removes the package's build products so the next build doesn't link objects left
-  /// over from the other mode. Dependency checkouts and downloads are kept, and so is
-  /// `index-build`, which sourcekit-lsp uses for background indexing.
+  /// over from the other mode. Dependency checkouts and downloads are kept, and so are
+  /// `index-build`, which sourcekit-lsp uses for background indexing, and the default
+  /// cache of binaries built on demand.
   ///
   /// Throws without removing anything while another SwiftPM process holds `.build/.lock`.
   @discardableResult
@@ -186,6 +178,7 @@ public struct DependencySwitcher: Sendable {
       "artifacts",
       "checkouts",
       "index-build",
+      DependencySwitcher.defaultCacheFolder,
       "repositories",
       "workspace-state.json"
     ]
@@ -203,11 +196,8 @@ public struct DependencySwitcher: Sendable {
     Shell(streamOutput: options.verbose)
   }
 
-  private struct CacheLocation {
-    let url: URL
-    /// The shared per-user cache, which the manifest locates through `packableCache`.
-    let isShared: Bool
-  }
+  /// The default cache of binaries built on demand, inside the package's `.build`.
+  static let defaultCacheFolder = "packable-cache"
 
   private var configDirectory: URL {
     options.configURL.deletingLastPathComponent()
@@ -226,17 +216,13 @@ public struct DependencySwitcher: Sendable {
     return ".package(url: \(swiftLiteral(location.url!)), \(location.requirementArguments!))"
   }
 
-  private func cacheLocation(for config: PackableConfig) -> CacheLocation {
+  /// `cache:` from packable.yml, else `.build/packable-cache` in the package.
+  private func cacheLocation(for config: PackableConfig) -> URL {
     if let cache = config.cache {
-      return CacheLocation(url: absoluteURL(cache), isShared: false)
+      return absoluteURL(cache)
     }
-    let environment = ProcessInfo.processInfo.environment
-    let path = environment["PACKABLE_CACHE"]
-      ?? NSHomeDirectory() + "/Library/Caches/packable"
-    return CacheLocation(
-      url: URL(fileURLWithPath: path).standardizedFileURL,
-      isShared: true
-    )
+    return options.packageDirectory
+      .appendingPathComponent(".build/\(DependencySwitcher.defaultCacheFolder)")
   }
 
   /// Returns the binary package directory for `dependency`, building it when the cache
@@ -245,11 +231,11 @@ public struct DependencySwitcher: Sendable {
   private func buildOnDemand(
     name: String,
     dependency: PackableConfig.Dependency,
-    cache: CacheLocation
+    cache: URL
   ) throws -> URL {
-    let root = cache.url.appendingPathComponent(name)
-    // Static and dynamic builds of one version are kept apart, since projects sharing the
-    // cache may want different ones.
+    let root = cache.appendingPathComponent(name)
+    // Static and dynamic builds of one version are kept apart, so switching `linkage:`
+    // back and forth doesn't rebuild.
     let variant = dependency.linkage == .static ? "" : "-\(dependency.linkage.rawValue)"
 
     if let path = dependency.source.path {
@@ -369,14 +355,14 @@ public struct DependencySwitcher: Sendable {
   private func sourceModules(
     of location: PackableConfig.Location,
     name: String,
-    cache: CacheLocation
+    cache: URL
   ) -> [String]? {
     guard let path = location.path else {
       return nil
     }
     let swiftPM = SwiftPM(
       packageDirectory: absoluteURL(path),
-      scratchDirectory: cache.url.appendingPathComponent(".manifests"),
+      scratchDirectory: cache.appendingPathComponent(".manifests"),
       shell: Shell()
     )
     let manifest = try? swiftPM.dumpManifest(at: absoluteURL(path), identity: name)

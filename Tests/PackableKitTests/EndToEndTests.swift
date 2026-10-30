@@ -209,8 +209,7 @@ private func expectDynamicFrameworks(in unzipped: URL, shell: Shell) throws {
       withIntermediateDirectories: true
     )
     try """
-      # Project-local cache, so the manifest refers to it by relative path.
-      cache: .packable-cache
+      # No `cache:`, so binaries go to the default .build/packable-cache.
       dependencies:
         Demo:
           source: { path: ../Demo }
@@ -269,10 +268,13 @@ private func expectDynamicFrameworks(in unzipped: URL, shell: Shell) throws {
     let (changed, binary) = try switcher.use(.binary, for: ["Demo"])
     #expect(changed == ["Demo"])
     #expect(binary.dependencies.first?.packageExpression
-      == ".package(path: \".packable-cache/Demo/local/Demo-binary\")")
-    let built = client.appendingPathComponent(".packable-cache/Demo/local/Demo-binary")
+      == ".package(path: \".build/packable-cache/Demo/local/Demo-binary\")")
+    let built = client
+      .appendingPathComponent(".build/packable-cache/Demo/local/Demo-binary")
     #expect(BinaryMetadata.read(from: built)?.modules == ["CDemo", "Demo", "DemoCore"])
+    // Clearing .build keeps the cache the manifest points at.
     try switcher.cleanBuildProducts()
+    #expect(BinaryMetadata.read(from: built) != nil)
     #expect(try runClient() == "42")
 
     try switcher.use(.source, for: ["Demo"])
@@ -291,7 +293,7 @@ private func expectDynamicFrameworks(in unzipped: URL, shell: Shell) throws {
       contentsOf: client.appendingPathComponent("packable.yml"),
       encoding: .utf8
     )
-    #expect(config.contains("# Project-local cache"))
+    #expect(config.contains("# No `cache:`"))
     #expect(config.contains("    mode: binary"))
   }
 }

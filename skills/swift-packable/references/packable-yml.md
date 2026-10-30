@@ -25,7 +25,7 @@ dependencies:
 | Key | Required | Meaning |
 |---|---|---|
 | `dependencies` | yes | Map of name → dependency. The name is what `use <names>` and `packable("<name>", from:)` refer to. |
-| `cache` | no | Where on-demand binaries go. Default: `$PACKABLE_CACHE`, else `~/Library/Caches/packable`. The default cache is referenced in `Package.swift` through `$HOME` (portable across machines); a custom `cache:` is written as a path relative to the package. |
+| `cache` | no | Where on-demand binaries go. Default: `.build/packable-cache` in the package (kept when `use` clears `.build`; `swift package clean` deletes it, so rerun `generate`). `Package.swift` refers to it by a path relative to the package. |
 
 ## Dependency
 

@@ -51,8 +51,8 @@ Examples/run-showcase.sh      # ~2.5 min; outputs go to Examples/build/
 6. **Switch between source and binary**: `SwitchableApp` runs with ShowcaseKit from source, then
    `swift-packable use binary ShowcaseKit` packages ShowcaseKit on demand (no `binary:`
    location is declared) and rewrites the block in `Package.swift`; the app runs the same on the
-   binaries. Switching back to source and to binary again reuses the cached binary. The script
-   keeps the cache in `Examples/build/packable-cache` and leaves the app in source mode.
+   binaries. Switching back to source and to binary again reuses the cached binary. The cache
+   is `Examples/SwitchableApp/.build/packable-cache`; the script leaves the app in source mode.
 
 ## Resources
 

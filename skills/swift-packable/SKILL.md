@@ -85,9 +85,9 @@ What is handled for you:
      ]
    )
    ```
-4. Flip with `swift-packable use binary ShowcaseKit` (or `use source --all`). `use` clears `.build` except checkouts, downloads, the lock file and `index-build`; `--no-clean` skips that.
+4. Flip with `swift-packable use binary ShowcaseKit` (or `use source --all`). `use` clears `.build` except checkouts, downloads, the lock file, `index-build` and `packable-cache`; `--no-clean` skips that.
 
-Binary mode uses `binary:` when declared; otherwise it packages `source` with the build pipeline and caches it (`~/Library/Caches/packable`, `$PACKABLE_CACHE`, or `cache:`). Local sources rebuild only when their files change; remote sources are cached per version. `--rebuild` (on `generate` or `use`) forces a rebuild and moves remote sources to their newest allowed version.
+Binary mode uses `binary:` when declared; otherwise it packages `source` with the build pipeline and caches it in the package's `.build/packable-cache` (or `cache:`). Local sources rebuild only when their files change; remote sources are cached per version. `--rebuild` (on `generate` or `use`) forces a rebuild and moves remote sources to their newest allowed version.
 
 ## Common mistakes
 
@@ -101,7 +101,7 @@ Binary mode uses `binary:` when declared; otherwise it packages `source` with th
 | `generate` stops naming a duplicate module | A binary already bundles a module that another entry also provides. Drop the separate entry, or keep both from source. |
 | Warning that a binary was built from a different tag/commit | Version drift between `binary:` and `source:`. Rebuild or repoint the binary. |
 | Validation error on a location | A `path` takes no version; a `url` needs exactly one of `from`, `exact`, `up-to-next-minor`, `branch`, `revision`. |
-| Fresh clone uses the shared cache but builds fail | Run `swift-packable generate` once to fill the cache on this machine. |
+| Fresh clone, or after `swift package clean`/`reset`, the binary package path is missing | Run `swift-packable generate` to rebuild the cache in `.build/packable-cache`. |
 | `swift run` with dynamic frameworks: `Library not loaded: @rpath/…` | `swift run -Xlinker -rpath -Xlinker @executable_path`, or `--build-system native`. Apps and `swift test` are fine. |
 | App using a static `.xcframework` directly (no package) can't find resources | Copy `<Package>_<Module>.bundle` from inside the framework into the app bundle. |
 

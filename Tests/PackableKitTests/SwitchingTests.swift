@@ -89,7 +89,7 @@ struct ManifestBlockTests {
     SwitchedDependency(
       name: "Kit",
       mode: .binary,
-      packageExpression: ".package(path: packableCache + \"/Kit/local/Kit-binary\")",
+      packageExpression: ".package(path: \".build/packable-cache/Kit/local/Kit-binary\")",
       packageName: "Kit-binary"
     ),
     SwitchedDependency(
@@ -101,15 +101,12 @@ struct ManifestBlockTests {
   ]
 
   @Test func rendersDependenciesAndHelper() {
-    let block = ManifestBlock.render(dependencies, usesSharedCache: true)
+    let block = ManifestBlock.render(dependencies)
     #expect(block.hasPrefix(ManifestBlock.beginMarker))
     #expect(block.hasSuffix(ManifestBlock.endMarker))
     #expect(block.contains("// Kit: binary, Remote: source"))
-    #expect(block
-      .contains(
-        "let packableCache = Context.environment[\"PACKABLE_CACHE\"]"
-      ))
-    #expect(block.contains("  .package(path: packableCache + \"/Kit/local/Kit-binary\")"))
+    #expect(!block.contains("packableCache"))
+    #expect(block.contains("  .package(path: \".build/packable-cache/Kit/local/Kit-binary\")"))
     #expect(block.contains("    \"Kit\": \"Kit-binary\""))
   }
 
@@ -138,7 +135,7 @@ struct ManifestBlockTests {
   @Test func generatedBlockCompiles() throws {
     let work = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: work) }
-    let block = ManifestBlock.render(dependencies, usesSharedCache: true)
+    let block = ManifestBlock.render(dependencies)
     let manifest = try ManifestBlock.splice(block, into: """
       // swift-tools-version:5.9
       import PackageDescription

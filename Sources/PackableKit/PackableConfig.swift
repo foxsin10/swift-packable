@@ -141,8 +141,8 @@ public struct PackableConfig: Decodable, Sendable {
   }
 
   public var dependencies: [String: Dependency]
-  /// Where binaries built on demand are kept. Default: the shared cache in
-  /// `~/Library/Caches/packable` (or `$PACKABLE_CACHE`).
+  /// Where binaries built on demand are kept. Default: `.build/packable-cache` in the
+  /// package.
   public var cache: String?
 
   /// Dependency names in a stable order.

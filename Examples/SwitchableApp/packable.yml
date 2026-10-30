@@ -2,7 +2,7 @@
 # Switch with:  swift-packable use source|binary ShowcaseKit
 dependencies:
   ShowcaseKit:
-    mode: source
+    mode: binary
     source: { path: ../ShowcaseKit }
     # No `binary:` location, so binary mode packages ShowcaseKit itself and caches the
     # result; it's rebuilt only when ShowcaseKit's files change.
