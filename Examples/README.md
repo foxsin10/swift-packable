@@ -32,6 +32,8 @@ Examples/run-showcase.sh      # ~2.5 min; outputs go to Examples/build/
 2. **Package everything** for the manifest's platforms (macOS, iOS, iOS Simulator):
    `swift-packable Examples/ShowcaseKit -o Examples/build/ShowcaseKit-binary`
    This produces 5 XCFrameworks (one per module) and a `Package.swift` with both products as binary targets.
+   Running the same command again prints `✔ Up to date` without building: the build checksum
+   (sources, dependencies, options, toolchain) hasn't changed.
 3. **Consume the binaries**: `ShowcaseApp` is built and run on macOS, then built for the iOS Simulator.
    Its `import ShowcaseKit` / `import ShowcaseStats` are the same as with the source package.
    Expected output:

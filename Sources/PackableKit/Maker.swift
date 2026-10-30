@@ -34,8 +34,8 @@ public struct MakerOptions: Sendable {
   public var bundleIdentifierPrefix: String = "packable"
   public var version: String = "1.0.0"
   public var verbose: Bool = false
-  /// Recorded in `packable-metadata.json`; set when building on demand from a local path.
-  public var sourceFingerprint: String?
+  /// Build even when the output's build checksum shows it's up to date.
+  public var rebuild: Bool = false
 }
 
 public struct MakerResult: Sendable {
@@ -45,6 +45,10 @@ public struct MakerResult: Sendable {
   public var products: [BinaryManifest.Product] = []
   public var manifest: URL?
   public var warnings: [String] = []
+  /// SHA-256 of the build's inputs, recorded in `packable-metadata.json`.
+  public var buildChecksum: String?
+  /// True when the output was already up to date and nothing was built.
+  public var skipped = false
 }
 
 /// Builds a Swift package's library products with SwiftPM and packages every module as an
@@ -84,6 +88,13 @@ public struct Maker: Sendable {
     log("  platforms: \(platforms.map(\.rawValue).joined(separator: ", "))")
 
     let swiftPM = swiftPM()
+    let checksum = buildChecksum(packages: packages, products: products, platforms: platforms)
+    if !options.rebuild,
+       let current = try upToDateResult(checksum: checksum, products: products) {
+      log("▸ Up to date (build checksum \(checksum.prefix(12))), nothing rebuilt")
+      return current
+    }
+    result.buildChecksum = checksum
     let assembler = FrameworkAssembler(
       shell: shell,
       bundleIdentifierPrefix: options.bundleIdentifierPrefix,
@@ -313,7 +324,7 @@ public struct Maker: Sendable {
       package: root.manifest.name,
       version: git.version,
       revision: git.revision,
-      fingerprint: options.sourceFingerprint,
+      buildChecksum: checksum,
       linkage: options.linkage,
       modules: frameworks.keys.sorted(),
       products: result.products.reduce(into: [:]) { $0[$1.name] = $1.modules }
@@ -346,6 +357,74 @@ public struct Maker: Sendable {
     stride(from: 0, to: arguments.count - 1, by: 2)
       .filter { arguments[$0] == "-Xlinker" }
       .flatMap { [arguments[$0], arguments[$0 + 1]] }
+  }
+
+  /// The build checksum for this run: every package's files, the settings that shape the
+  /// output, and the toolchain. The output and scratch folders are left out, in case they
+  /// sit inside a package.
+  func buildChecksum(
+    packages: [ResolvedPackage],
+    products: [String],
+    platforms: [ApplePlatform]
+  ) -> String {
+    let architectures = platforms.map { platform in
+      let list = options.architectures[platform] ?? platform.defaultArchitectures
+      return "\(platform.rawValue)=\(list.joined(separator: ","))"
+    }
+    let targets = options.deploymentTargets.sorted { $0.key < $1.key }
+      .map { "\($0.key)=\($0.value)" }
+    let settings = [
+      "products:" + products.joined(separator: ","),
+      "platforms:" + platforms.map(\.rawValue).joined(separator: ","),
+      "architectures:" + architectures.joined(separator: ";"),
+      "deployment-targets:" + targets.joined(separator: ","),
+      "configuration:" + options.configuration,
+      "linkage:" + options.linkage.rawValue,
+      "verify-interfaces:\(options.verifyModuleInterfaces)",
+      "binary-swiftmodules:\(options.includeBinarySwiftModules)",
+      "build-arguments:" + options.extraBuildArguments.joined(separator: "\u{1F}"),
+      "zip:\(options.zip)",
+      "base-url:" + (options.baseURL ?? ""),
+      "bundle-id-prefix:" + options.bundleIdentifierPrefix,
+      "framework-version:" + options.version
+    ] + BuildChecksum.toolchain(shell: Shell())
+    return BuildChecksum.compute(
+      packages: packages.map { ($0.identity, $0.directory) },
+      settings: settings,
+      excluding: [options.outputDirectory, scratchDirectory]
+    )
+  }
+
+  /// The result of the previous build when the output was built from the same inputs and
+  /// is still complete; `nil` when it has to be built again.
+  func upToDateResult(checksum: String, products: [String]) throws -> MakerResult? {
+    let output = options.outputDirectory
+    let fileManager = FileManager.default
+    guard let metadata = BinaryMetadata.read(from: output),
+          metadata.buildChecksum == checksum,
+          fileManager.fileExists(atPath: output.appendingPathComponent("Package.swift").path)
+    else {
+      return nil
+    }
+    let suffix = options.zip ? ".xcframework.zip" : ".xcframework"
+    var result = MakerResult()
+    for module in metadata.modules {
+      let artifact = output.appendingPathComponent("XCFrameworks/\(module)\(suffix)")
+      guard fileManager.fileExists(atPath: artifact.path) else {
+        return nil
+      }
+      result.artifacts[module] = artifact
+      if options.zip {
+        result.checksums[module] = try swiftPM().computeChecksum(of: artifact)
+      }
+    }
+    result.products = products.map {
+      BinaryManifest.Product(name: $0, modules: metadata.products[$0] ?? [])
+    }
+    result.manifest = output.appendingPathComponent("Package.swift")
+    result.buildChecksum = checksum
+    result.skipped = true
+    return result
   }
 
   func selectedProducts(of manifest: PackageManifest) throws -> [String] {

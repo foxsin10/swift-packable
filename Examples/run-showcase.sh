@@ -25,6 +25,9 @@ step "2. Package every library product for the manifest's platforms"
 run "$TOOL" "$KIT" -o "$BUILD/ShowcaseKit-binary"
 echo
 cat "$BUILD/ShowcaseKit-binary/Package.swift"
+echo
+# Same sources, options and toolchain: the build checksum matches, so nothing is rebuilt.
+run "$TOOL" "$KIT" -o "$BUILD/ShowcaseKit-binary"
 
 step "3. Use the binaries from a client package"
 # ShowcaseKit's resources come with the binary package (a resource target next to its

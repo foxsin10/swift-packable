@@ -226,8 +226,9 @@ public struct DependencySwitcher: Sendable {
   }
 
   /// Returns the binary package directory for `dependency`, building it when the cache
-  /// has no current copy. Local sources are keyed by a fingerprint of their files,
-  /// remote ones by the version (or revision) SwiftPM resolves.
+  /// has no current copy. A local source is rebuilt when its build checksum changes (its
+  /// files, its dependencies' files, the settings or the toolchain); a remote one is
+  /// keyed by the version (or revision) SwiftPM resolves.
   private func buildOnDemand(
     name: String,
     dependency: PackableConfig.Dependency,
@@ -240,19 +241,13 @@ public struct DependencySwitcher: Sendable {
 
     if let path = dependency.source.path {
       let source = absoluteURL(path)
-      let fingerprint = sourceFingerprint(of: source)
       let output = root.appendingPathComponent("local\(variant)/\(name)-binary")
-      if !options.rebuild, BinaryMetadata.read(from: output)?.fingerprint == fingerprint {
-        log("▸ \(name): binary is up to date (\(output.path))")
-        return output
-      }
-      log("▸ \(name): building binary from \(source.path)")
+      log("▸ \(name): binary from \(source.path)")
       try package(
         source: source,
         into: output,
         scratch: root.appendingPathComponent("local\(variant)/scratch"),
-        dependency: dependency,
-        fingerprint: fingerprint
+        dependency: dependency
       )
       return output
     }
@@ -328,8 +323,7 @@ public struct DependencySwitcher: Sendable {
     source: URL,
     into output: URL,
     scratch: URL,
-    dependency: PackableConfig.Dependency,
-    fingerprint: String? = nil
+    dependency: PackableConfig.Dependency
   ) throws {
     var options = MakerOptions(packageDirectory: source, outputDirectory: output)
     options.scratchDirectory = scratch
@@ -342,7 +336,7 @@ public struct DependencySwitcher: Sendable {
     }
     options.verifyModuleInterfaces = !dependency.skipInterfaceVerification
     options.linkage = dependency.linkage
-    options.sourceFingerprint = fingerprint
+    options.rebuild = self.options.rebuild
     options.verbose = self.options.verbose
     let log = log
     let result = try Maker(options: options, log: { log("  " + $0) }).run()

@@ -282,7 +282,7 @@ private func expectDynamicFrameworks(in unzipped: URL, shell: Shell) throws {
     #expect(try manifest().contains(".package(path: \"../Demo\")"))
     #expect(try runClient() == "42")
 
-    // The cached binary is reused: its fingerprint still matches the sources.
+    // The cached binary is reused: its build checksum still matches.
     let modified = try FileManager.default
       .attributesOfItem(atPath: built.path)[.modificationDate] as? Date
     try switcher.use(.binary, for: ["Demo"])
@@ -323,6 +323,21 @@ struct CustomLayoutEndToEndTests {
 
     #expect(result.artifacts.keys.sorted() == ["CLegacy", "Core", "Extra", "RootKit"])
     #expect(result.warnings.isEmpty)
+    #expect(!result.skipped)
+    #expect(BinaryMetadata.read(from: output)?.buildChecksum == result.buildChecksum)
+
+    // Same inputs: nothing is rebuilt and the XCFrameworks are left as they are.
+    let xcframework = output.appendingPathComponent("XCFrameworks/Core.xcframework")
+    let built = try FileManager.default
+      .attributesOfItem(atPath: xcframework.path)[.modificationDate] as? Date
+    let again = try Maker(options: options, log: { _ in }).run()
+    #expect(again.skipped)
+    #expect(again.buildChecksum == result.buildChecksum)
+    #expect(again.artifacts.mapValues(\.path) == result.artifacts.mapValues(\.path))
+    #expect(again.products == result.products)
+    let reused = try FileManager.default
+      .attributesOfItem(atPath: xcframework.path)[.modificationDate] as? Date
+    #expect(reused == built)
 
     // Only headers from `publicHeadersPath: "."`, not the C source next to them.
     let headers = output.appendingPathComponent(

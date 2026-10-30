@@ -7,7 +7,7 @@ description: Use when packaging a Swift package's library products into XCFramew
 
 `swift-packable` turns a Swift package's library products into XCFrameworks plus a binary `Package.swift`, and lets a client package flip each dependency between source and binary from a `packable.yml`. It runs on SwiftPM's Swift Build engine, Apple platforms only.
 
-Check it is installed with `swift-packable --version` (prints the tool version, e.g. `0.1.0`). If it isn't, build it from the swift-packable repo with `swift build -c release` and run `.build/release/swift-packable`, or copy that binary onto PATH. It needs full Xcode (not only Command Line Tools) and the SDK of every platform you build. For every `packable.yml` key, read [packable-yml.md](references/packable-yml.md). For any flag, `swift-packable help <subcommand>` is authoritative.
+Check it is installed with `swift-packable --version` (prints the tool version, e.g. `0.1.0`). If it isn't, run `make install` in the swift-packable repo (release build copied to `~/.local/bin`; `PREFIX=/usr/local` to change), or build it with `swift build -c release` and run `.build/release/swift-packable`. It needs full Xcode (not only Command Line Tools) and the SDK of every platform you build. For every `packable.yml` key, read [packable-yml.md](references/packable-yml.md). For any flag, `swift-packable help <subcommand>` is authoritative.
 
 ## Commands
 
@@ -44,6 +44,7 @@ swift-packable path/to/MyPackage --zip --base-url https://example.com/releases/1
 | `--bundle-id-prefix`, `--framework-version` | `CFBundleIdentifier` prefix (default `packable`) and bundle version (default `1.0.0`). |
 | `--scratch-path` | Default `<package>/.build/packable`. |
 | `-Xswiftc`, `-Xcc`, `-Xlinker` | Pass-through flags (`-Xlinker` also reaches the dylib link with `--linkage dynamic`). |
+| `--rebuild` | Build even when the output is up to date (see below). |
 | `-v` | Stream `swift build` output. Use it when a build fails. |
 
 Output:
@@ -56,7 +57,9 @@ MyPackage-binary/
     └── MyLibCore.xcframework
 ```
 
-Clients point their dependency at that folder (or the published URL) instead of the source; `import`s stay the same. Every generated binary package also has `packable-metadata.json` (source tag/commit and the modules it bundles).
+Clients point their dependency at that folder (or the published URL) instead of the source; `import`s stay the same. Every generated binary package also has `packable-metadata.json` (source tag/commit, the modules it bundles, and the build checksum).
+
+**Unchanged builds are skipped.** The build checksum is a SHA-256 of the file contents of the package and every package in its graph (minus `.build`, `.git`, `.swiftpm`, output and scratch folders), the output-shaping options, `swift --version`, `xcodebuild -version` and the `swift-packable` binary. If it matches the existing output and the XCFrameworks are all there, the command prints `✔ Up to date` and builds nothing. Modification dates don't count. Use `--rebuild` to force a build.
 
 What is handled for you:
 
@@ -87,7 +90,7 @@ What is handled for you:
    ```
 4. Flip with `swift-packable use binary ShowcaseKit` (or `use source --all`). `use` clears `.build` except checkouts, downloads, the lock file, `index-build` and `packable-cache`; `--no-clean` skips that.
 
-Binary mode uses `binary:` when declared; otherwise it packages `source` with the build pipeline and caches it in the package's `.build/packable-cache` (or `cache:`). Local sources rebuild only when their files change; remote sources are cached per version. `--rebuild` (on `generate` or `use`) forces a rebuild and moves remote sources to their newest allowed version.
+Binary mode uses `binary:` when declared; otherwise it packages `source` with the build pipeline and caches it in the package's `.build/packable-cache` (or `cache:`). Local sources rebuild only when their build checksum changes (their files, their dependencies' files, settings or toolchain); remote sources are cached per version. `--rebuild` (on `generate` or `use`) forces a rebuild and moves remote sources to their newest allowed version.
 
 ## Common mistakes
 

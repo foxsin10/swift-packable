@@ -12,8 +12,9 @@ public struct BinaryMetadata: Codable, Sendable, Equatable {
   public var version: String?
   /// Git commit of the source, with `-dirty` when it had local changes.
   public var revision: String?
-  /// Fingerprint of the source files, for binaries built on demand from a local path.
-  public var fingerprint: String?
+  /// SHA-256 of everything the build depended on (see `BuildChecksum`). A build whose
+  /// inputs give the same checksum reuses this output.
+  public var buildChecksum: String?
   /// How the frameworks link; `nil` in metadata written before dynamic frameworks, which
   /// were all static.
   public var linkage: Linkage?
@@ -57,50 +58,4 @@ struct GitInfo {
 
   let revision: String?
   let version: String?
-}
-
-/// A fingerprint of the files that affect a package's build: sizes and modification
-/// dates of everything outside build, VCS and editor folders.
-func sourceFingerprint(of directory: URL) -> String {
-  let skipped: Set = [".build", ".git", ".swiftpm", ".DS_Store"]
-  guard let enumerator = FileManager.default.enumerator(
-    at: directory,
-    includingPropertiesForKeys: [
-      .fileSizeKey,
-      .contentModificationDateKey,
-      .isRegularFileKey
-    ]
-  ) else {
-    return ""
-  }
-  var entries: [String] = []
-  for case let url as URL in enumerator {
-    if skipped.contains(url.lastPathComponent) {
-      enumerator.skipDescendants()
-      continue
-    }
-    let keys: Set<URLResourceKey> = [
-      .fileSizeKey,
-      .contentModificationDateKey,
-      .isRegularFileKey
-    ]
-    guard let values = try? url.resourceValues(forKeys: keys),
-          values.isRegularFile == true else {
-      continue
-    }
-    let relative = String(url.path.dropFirst(directory.path.count))
-    let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
-    entries.append("\(relative)|\(values.fileSize ?? 0)|\(modified)")
-  }
-  return stableHash(entries.sorted().joined(separator: "\n"))
-}
-
-/// FNV-1a 64-bit, as hex. Only used to detect changes, not for security.
-func stableHash(_ string: String) -> String {
-  var hash: UInt64 = 0xCBF2_9CE4_8422_2325
-  for byte in string.utf8 {
-    hash ^= UInt64(byte)
-    hash = hash &* 0x0000_0100_0000_01B3
-  }
-  return String(hash, radix: 16)
 }

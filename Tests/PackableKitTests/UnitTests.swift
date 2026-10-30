@@ -490,3 +490,75 @@ struct ShellErrorTests {
     #expect(lines.last == "line 50")
   }
 }
+
+struct BuildChecksumTests {
+  func write(_ text: String, to url: URL) throws {
+    try FileManager.default.createDirectory(
+      at: url.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try text.write(to: url, atomically: true, encoding: .utf8)
+  }
+
+  func checksum(_ package: URL, settings: [String] = [], excluding: [URL] = []) -> String {
+    BuildChecksum.compute(
+      packages: [("kit", package)],
+      settings: settings,
+      excluding: excluding
+    )
+  }
+
+  @Test func followsContentsNotModificationDates() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let source = work.appendingPathComponent("Sources/Kit/Kit.swift")
+    try write("let a = 1", to: source)
+    let original = checksum(work)
+
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: 0)],
+      ofItemAtPath: source.path
+    )
+    #expect(checksum(work) == original)
+
+    try write("let a = 2", to: source)
+    #expect(checksum(work) != original)
+  }
+
+  @Test func ignoresBuildFoldersAndExcludedDirectories() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    try write("let a = 1", to: work.appendingPathComponent("Sources/Kit/Kit.swift"))
+    let output = work.appendingPathComponent("Output")
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    let original = checksum(work, excluding: [output])
+
+    try write("x", to: work.appendingPathComponent(".build/debug/x.o"))
+    try write("x", to: work.appendingPathComponent(".git/HEAD"))
+    try write("x", to: output.appendingPathComponent("Package.swift"))
+    #expect(checksum(work, excluding: [output]) == original)
+
+    try write("x", to: work.appendingPathComponent("Sources/Kit/New.swift"))
+    #expect(checksum(work, excluding: [output]) != original)
+  }
+
+  @Test func includesSettingsAndEveryPackage() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let kit = work.appendingPathComponent("Kit")
+    let dependency = work.appendingPathComponent("Dependency")
+    try write("let a = 1", to: kit.appendingPathComponent("Kit.swift"))
+    try write("let b = 1", to: dependency.appendingPathComponent("Dependency.swift"))
+    func both(_ settings: [String] = []) -> String {
+      BuildChecksum.compute(
+        packages: [("kit", kit), ("dependency", dependency)],
+        settings: settings
+      )
+    }
+    let original = both()
+    #expect(both(["linkage:dynamic"]) != original)
+
+    try write("let b = 2", to: dependency.appendingPathComponent("Dependency.swift"))
+    #expect(both() != original)
+  }
+}

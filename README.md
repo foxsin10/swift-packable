@@ -44,7 +44,17 @@ swift build -c release
 .build/release/swift-packable --version   # prints the tool version, e.g. 0.1.0
 ```
 
-To put the command on your PATH, either install it with SwiftPM:
+To put the command on your PATH, use the Makefile:
+
+```bash
+make install                      # builds in release and copies it to ~/.local/bin
+make install PREFIX=/usr/local    # or into /usr/local/bin (may need sudo)
+make uninstall                    # removes it (pass the same PREFIX)
+```
+
+`make install` prints a note if the folder isn't on PATH (fish: `fish_add_path ~/.local/bin`). `make test` runs the tests.
+
+Or install it with SwiftPM:
 
 ```bash
 swift package experimental-install --product swift-packable   # into ~/.swiftpm/bin
@@ -103,6 +113,16 @@ MyPackage-binary/
 
 Clients only need to point their dependency at this directory (or at the published location) instead of the source package; their `import` statements stay the same.
 
+### Skipping unchanged builds
+
+Every build records a **build checksum** in the output's `packable-metadata.json`. It is a SHA-256 of:
+
+- the file contents of the package and of every package in its dependency graph (local path dependencies and resolved remote checkouts), leaving out `.build`, `.git`, `.swiftpm` and the output and scratch folders
+- the options that shape the output (products, platforms, architectures, deployment targets, configuration, linkage, interface and `.swiftmodule` settings, pass-through flags, zip and base URL, bundle ID prefix, framework version)
+- the toolchain (`swift --version`, `xcodebuild -version`) and the `swift-packable` binary itself
+
+When the checksum matches the existing output and all of its XCFrameworks are still there, nothing is built: the command prints `✔ Up to date` and leaves the output as it is. Only the package graph is resolved and the files are read. Pass `--rebuild` to build anyway. Modification dates don't count, so a fresh clone or `touch` doesn't trigger a rebuild.
+
 ### Common options
 
 | Option | Description |
@@ -117,6 +137,7 @@ Clients only need to point their dependency at this directory (or at the publish
 | `--skip-interface-verification` | Skip `.swiftinterface` verification (see below) |
 | `--include-binary-swiftmodules` | Keep the compiled `.swiftmodule` files in the XCFrameworks |
 | `-Xswiftc` / `-Xcc` / `-Xlinker` | Pass flags through to `swift build` (`-Xlinker` also reaches the dylib link with `--linkage dynamic`) |
+| `--rebuild` | Build even when the build checksum shows the output is up to date (see [Skipping unchanged builds](#skipping-unchanged-builds)) |
 | `-v` | Show the full `swift build` output |
 
 ## Switching dependencies between source and binary
@@ -204,7 +225,7 @@ let package = Package(
 Where binaries come from:
 
 - **Declared:** `binary:` points at a binary package, either one this tool generated or a released one at a URL.
-- **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in the package's `.build/packable-cache` (override with `cache:` in `packable.yml`). Local sources are rebuilt only when their files change. Remote sources are resolved by SwiftPM and cached per version. `.build` isn't committed, so run `generate` after cloning, and after `swift package clean` or `swift package reset` (both delete it), to fill the cache again.
+- **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in the package's `.build/packable-cache` (override with `cache:` in `packable.yml`). Local sources are rebuilt only when their [build checksum](#skipping-unchanged-builds) changes: their files, their dependencies' files, the build settings or the toolchain. Remote sources are resolved by SwiftPM and cached per version. `.build` isn't committed, so run `generate` after cloning, and after `swift package clean` or `swift package reset` (both delete it), to fill the cache again.
 
 Checks:
 

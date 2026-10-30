@@ -132,6 +132,11 @@ struct Build: ParsableCommand {
   )
   var linkerFlags: [String] = []
 
+  @Flag(
+    help: "Build even when the output's build checksum (sources, dependencies, options, toolchain) is unchanged."
+  )
+  var rebuild = false
+
   @Flag(name: .shortAndLong, help: "Stream swift build output.")
   var verbose = false
 
@@ -174,6 +179,7 @@ struct Build: ParsableCommand {
     options.bundleIdentifierPrefix = bundleIdPrefix
     options.version = frameworkVersion
     options.verbose = verbose
+    options.rebuild = rebuild
 
     let start = Date()
     let result: MakerResult
@@ -187,9 +193,15 @@ struct Build: ParsableCommand {
     for warning in result.warnings {
       print("warning: \(warning)")
     }
-    print(
-      "✔ Built \(result.artifacts.count) XCFramework(s) in \(String(format: "%.1f", Date().timeIntervalSince(start)))s"
-    )
+    let elapsed = String(format: "%.1f", Date().timeIntervalSince(start))
+    if result.skipped {
+      print("✔ Up to date: \(result.artifacts.count) XCFramework(s), nothing rebuilt (\(elapsed)s)")
+    } else {
+      print("✔ Built \(result.artifacts.count) XCFramework(s) in \(elapsed)s")
+    }
+    if let checksum = result.buildChecksum {
+      print("  build checksum: \(checksum)")
+    }
     for (module, url) in result.artifacts.sorted(by: { $0.key < $1.key }) {
       let checksum = result.checksums[module].map { "  checksum: \($0)" } ?? ""
       print("  \(url.path)\(checksum)")
