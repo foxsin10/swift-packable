@@ -36,8 +36,7 @@ public struct SwiftPM: Sendable {
     )
     let root = try JSONDecoder().decode(DependencyNode.self, from: Data(json.utf8))
     return try root.flattened().enumerated().map { index, node in
-      // show-dependencies reports the root's path as given; dependencies live in
-      // checkouts.
+      // The root's path is used as given; dependencies live in checkouts.
       let directory = index == 0 ? packageDirectory : URL(fileURLWithPath: node.path)
       return try ResolvedPackage(
         identity: node.identity,
@@ -69,6 +68,29 @@ public struct SwiftPM: Sendable {
   public func build(product: String, request: BuildRequest) throws {
     let arguments = try buildArguments(for: request)
     try shell.run(["swift", "build"] + arguments + ["--product", product])
+  }
+
+  /// The root package's resources as SwiftPM resolved them, keyed by target name, with
+  /// absolute paths. Unlike the manifest's declarations, this already applies `exclude:`,
+  /// implicit resource types and target boundaries.
+  public func describeResources() throws -> [String: [PackageManifest.Resource]] {
+    struct Description: Decodable {
+      struct Target: Decodable {
+        let name: String
+        let resources: [PackageManifest.Resource]?
+      }
+
+      let targets: [Target]
+    }
+    let command = ["swift", "package"] + locationArguments + [
+      "describe",
+      "--type",
+      "json"
+    ]
+    let output = try shell.run(command, stream: false)
+    let json = output.firstIndex(of: "{").map { output[$0...] } ?? ""
+    let description = try JSONDecoder().decode(Description.self, from: Data(json.utf8))
+    return description.targets.reduce(into: [:]) { $0[$1.name] = $1.resources ?? [] }
   }
 
   public func computeChecksum(of archive: URL) throws -> String {

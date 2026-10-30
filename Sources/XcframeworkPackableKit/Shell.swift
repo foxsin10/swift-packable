@@ -5,10 +5,20 @@ public struct ShellError: Error, CustomStringConvertible {
   public let status: Int32
   public let output: String
 
+  /// The failed command plus its `error:` lines (or the last 40 lines when there are
+  /// none). Compiler failures echo multi-kilobyte command lines, so long lines are
+  /// clipped.
   public var description: String {
-    let tail = output.split(separator: "\n", omittingEmptySubsequences: false).suffix(40)
-      .joined(separator: "\n")
-    return "Command failed (exit \(status)): \(command.joined(separator: " "))\n\(tail)"
+    let lines = output.split(separator: "\n").map(String.init)
+    var seen = Set<String>()
+    let errors = lines.filter { $0.contains("error:") && seen.insert($0).inserted }
+    let shown = (errors.isEmpty ? Array(lines.suffix(40)) : errors).map(Self.clipped)
+    let header = "Command failed (exit \(status)): \(command.joined(separator: " "))"
+    return ([header] + shown).joined(separator: "\n")
+  }
+
+  private static func clipped(_ line: String) -> String {
+    line.count > 400 ? line.prefix(400) + "…" : line
   }
 }
 

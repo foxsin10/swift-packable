@@ -14,9 +14,15 @@ struct XcframeworkPackable: ParsableCommand {
       `xcodebuild -create-xcframework`, and writes a Package.swift that exposes the \
       results as binary targets.
       """,
-    subcommands: [Build.self, List.self],
+    subcommands: [Build.self, List.self, Generate.self, Use.self],
     defaultSubcommand: Build.self
   )
+
+  static func main() {
+    // Keep stdout lines in order with the progress lines on stderr when piped.
+    setvbuf(stdout, nil, _IOLBF, 0)
+    main(nil)
+  }
 }
 
 struct PackageLocation: ParsableArguments {

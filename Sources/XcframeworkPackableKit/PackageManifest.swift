@@ -18,11 +18,60 @@ public struct PackageManifest: Decodable, Sendable {
     let type: [String: AnyDecodable]
   }
 
+  /// A `resources:` entry, e.g. `.process("Resources")`.
+  public struct Resource: Decodable, Sendable, Equatable {
+    public init(path: String, rule: Rule, localization: String? = nil) {
+      self.path = path
+      self.rule = rule
+      self.localization = localization
+    }
+
+    public init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      path = try container.decode(String.self, forKey: .path)
+      let rules = try container.decode([String: RuleOptions].self, forKey: .rule)
+      guard let (name, options) = rules.first, let rule = Rule(rawValue: name) else {
+        throw DecodingError.dataCorruptedError(
+          forKey: .rule,
+          in: container,
+          debugDescription: "Unknown resource rule \(rules.keys.sorted())"
+        )
+      }
+      self.rule = rule
+      localization = options.localization
+    }
+
+    public enum Rule: String, Sendable {
+      case process
+      case copy
+      case embedInCode
+    }
+
+    public let path: String
+    public let rule: Rule
+    /// `default` or `base` for `.process(_:localization:)`.
+    public let localization: String?
+
+    enum CodingKeys: String, CodingKey {
+      case path
+      case rule
+    }
+
+    struct RuleOptions: Decodable {
+      let localization: String?
+    }
+  }
+
   public struct Target: Decodable, Sendable {
     public let name: String
     public let type: String
     public let path: String?
     public let publicHeadersPath: String?
+    public let resources: [Resource]?
+    /// Paths relative to the target folder that SwiftPM ignores.
+    public let exclude: [String]?
+    /// When set, the only source paths of the target.
+    public let sources: [String]?
 
     /// Targets that end up as linkable library modules in a build.
     public var isLibrary: Bool {
@@ -31,6 +80,7 @@ public struct PackageManifest: Decodable, Sendable {
   }
 
   public let name: String
+  public let defaultLocalization: String?
   public let platforms: [Platform]
   public let products: [Product]
   public let targets: [Target]
@@ -88,6 +138,19 @@ public struct ResolvedPackage: Sendable {
     }
     return candidates
       .first { FileManager.default.fileExists(atPath: $0.path) } ?? candidates[0]
+  }
+
+  /// Folders inside `target`'s folder that aren't part of it: its `exclude:` paths and
+  /// the folders of other targets nested inside it (as with `path: "."`).
+  public func foreignDirectories(within target: PackageManifest.Target) -> [URL] {
+    let own = sourceDirectory(of: target)
+    let ownPath = canonicalPath(own) + "/"
+    let excluded = (target.exclude ?? []).map { own.appendingPathComponent($0) }
+    let nested = manifest.targets
+      .filter { $0.name != target.name }
+      .map(sourceDirectory(of:))
+      .filter { canonicalPath($0).hasPrefix(ownPath) }
+    return excluded + nested
   }
 
   /// The public headers directory of a C-family target.

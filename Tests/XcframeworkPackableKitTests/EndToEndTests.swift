@@ -34,7 +34,21 @@ import Testing
       .init(name: "DemoExtras", modules: ["DemoExtras", "DemoCore"])
     ])
     #expect(result.checksums.count == 4)
-    #expect(result.warnings.contains { $0.contains("Demo_DemoExtras.bundle") })
+    #expect(result.warnings.isEmpty)
+
+    // DemoExtras has resources: its binary target is renamed, and a carrier target with
+    // the original resource files takes the module's name.
+    let binaryPackage = work.appendingPathComponent("DemoBinary")
+    let generated = try String(
+      contentsOf: binaryPackage.appendingPathComponent("Package.swift"),
+      encoding: .utf8
+    )
+    #expect(generated
+      .contains(#"targets: ["DemoExtrasBinary", "DemoExtras", "DemoCore"]"#))
+    #expect(generated.contains(#"resources: [.process("Resources/message.txt")]"#))
+    let message = binaryPackage
+      .appendingPathComponent("Resources/DemoExtras/Resources/message.txt")
+    #expect(FileManager.default.fileExists(atPath: message.path))
 
     // Universal macOS slice, merged -Swift.h, framework module map for the C target.
     let shell = Shell()
@@ -100,6 +114,8 @@ import Testing
       import Demo
       import DemoExtras
       print(Demo.answer(), Greeter().greeting(), Extras.doubled(), cdemo_add(2, 3))
+      // Read from DemoExtras' resource bundle, which SwiftPM installs from the carrier target.
+      print(Extras.message() ?? "missing")
       """.write(
       to: client.appendingPathComponent("Sources/Client/main.swift"),
       atomically: true,
@@ -109,7 +125,7 @@ import Testing
     let scratch = ["--scratch-path", work.appendingPathComponent("client-scratch").path]
     let output = try shell.run(["swift", "run"] + scratch + ["Client"], in: client)
     #expect(output.trimmingCharacters(in: .whitespacesAndNewlines)
-      .hasSuffix("42 answer=42 82 5"))
+      .hasSuffix("42 answer=42 82 5\nhello from resources"))
 
     let simulatorSDK = try shell.run([
       "xcrun",
@@ -126,5 +142,192 @@ import Testing
       ],
       in: client
     )
+  }
+}
+
+/// A client switches the `Fixtures/Demo` package between source and an on-demand binary.
+@Suite(.serialized) struct SwitchingEndToEndTests {
+  @Test(.timeLimit(.minutes(10)))
+  func switchesBetweenSourceAndBinary() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+
+    let fixture = try #require(Bundle.module.url(
+      forResource: "Fixtures/Demo",
+      withExtension: nil
+    ))
+    try FileManager.default.copyItem(at: fixture, to: work.appendingPathComponent("Demo"))
+
+    let client = work.appendingPathComponent("Client")
+    try FileManager.default.createDirectory(
+      at: client.appendingPathComponent("Sources/Client"),
+      withIntermediateDirectories: true
+    )
+    try """
+      # Project-local cache, so the manifest refers to it by relative path.
+      cache: .packable-cache
+      dependencies:
+        Demo:
+          source: { path: ../Demo }
+          products: [Demo]
+          platforms: [macos]
+      """.write(
+      to: client.appendingPathComponent("packable.yml"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try """
+      // swift-tools-version:5.9
+      import PackageDescription
+
+      let package = Package(
+        name: "Client",
+        platforms: [.macOS(.v12)],
+        dependencies: packableDependencies,
+        targets: [.executableTarget(name: "Client", dependencies: [packable("Demo", from: "Demo")])]
+      )
+      """.write(
+      to: client.appendingPathComponent("Package.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try """
+      import Demo
+      print(Demo.answer())
+      """.write(
+      to: client.appendingPathComponent("Sources/Client/main.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+
+    let switcher = DependencySwitcher(
+      options: .init(packageDirectory: client),
+      log: { _ in }
+    )
+    let shell = Shell()
+    func runClient() throws -> String {
+      try shell.run(["swift", "run", "--package-path", client.path, "Client"])
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    func manifest() throws -> String {
+      try String(
+        contentsOf: client.appendingPathComponent("Package.swift"),
+        encoding: .utf8
+      )
+    }
+
+    let source = try switcher.generate()
+    #expect(source.dependencies
+      .map(\.packageExpression) == [".package(path: \"../Demo\")"])
+    #expect(try runClient() == "42")
+
+    let (changed, binary) = try switcher.use(.binary, for: ["Demo"])
+    #expect(changed == ["Demo"])
+    #expect(binary.dependencies.first?.packageExpression
+      == ".package(path: \".packable-cache/Demo/local/Demo-binary\")")
+    let built = client.appendingPathComponent(".packable-cache/Demo/local/Demo-binary")
+    #expect(BinaryMetadata.read(from: built)?.modules == ["CDemo", "Demo", "DemoCore"])
+    try switcher.cleanBuildProducts()
+    #expect(try runClient() == "42")
+
+    try switcher.use(.source, for: ["Demo"])
+    try switcher.cleanBuildProducts()
+    #expect(try manifest().contains(".package(path: \"../Demo\")"))
+    #expect(try runClient() == "42")
+
+    // The cached binary is reused: its fingerprint still matches the sources.
+    let modified = try FileManager.default
+      .attributesOfItem(atPath: built.path)[.modificationDate] as? Date
+    try switcher.use(.binary, for: ["Demo"])
+    let after = try FileManager.default
+      .attributesOfItem(atPath: built.path)[.modificationDate] as? Date
+    #expect(modified == after)
+    let config = try String(
+      contentsOf: client.appendingPathComponent("packable.yml"),
+      encoding: .utf8
+    )
+    #expect(config.contains("# Project-local cache"))
+    #expect(config.contains("    mode: binary"))
+  }
+}
+
+/// Packages `Fixtures/CustomLayout`, whose targets live outside `Sources/<Target>`:
+/// a custom `path:`, headers next to C sources, the `src/` default folder, and a target
+/// at the package root narrowed with `sources:` and `exclude:`.
+struct CustomLayoutEndToEndTests {
+  @Test(.timeLimit(.minutes(10)))
+  func packagesCustomLayoutAndClientRuns() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+
+    let fixture = try #require(Bundle.module.url(
+      forResource: "Fixtures/CustomLayout",
+      withExtension: nil
+    ))
+    let source = work.appendingPathComponent("CustomLayout")
+    try FileManager.default.copyItem(at: fixture, to: source)
+
+    let output = work.appendingPathComponent("CustomLayoutBinary")
+    var options = MakerOptions(packageDirectory: source, outputDirectory: output)
+    options.scratchDirectory = work.appendingPathComponent("scratch")
+    options.platforms = [.macOS]
+    options.architectures = [.macOS: ["arm64"]]
+    let result = try Maker(options: options, log: { _ in }).run()
+
+    #expect(result.artifacts.keys.sorted() == ["CLegacy", "Core", "Extra", "RootKit"])
+    #expect(result.warnings.isEmpty)
+
+    // Only headers from `publicHeadersPath: "."`, not the C source next to them.
+    let headers = output.appendingPathComponent(
+      "XCFrameworks/CLegacy.xcframework/macos-arm64/CLegacy.framework/Headers"
+    )
+    let headerFiles = try FileManager.default.contentsOfDirectory(atPath: headers.path)
+      .sorted()
+    #expect(headerFiles == ["CLegacy-umbrella.h", "legacy.h"])
+
+    // Carriers hold SwiftPM's resources; the excluded asset catalog stays out.
+    let manifest = try String(
+      contentsOf: output.appendingPathComponent("Package.swift"),
+      encoding: .utf8
+    )
+    #expect(manifest.contains(#"resources: [.process("Resources/core.txt")],"#))
+    #expect(manifest.contains(#"resources: [.copy("root.txt")],"#))
+    #expect(!manifest.contains("Stray"))
+
+    let client = work.appendingPathComponent("Client")
+    try FileManager.default.createDirectory(
+      at: client.appendingPathComponent("Sources/Client"),
+      withIntermediateDirectories: true
+    )
+    try """
+      // swift-tools-version:5.9
+      import PackageDescription
+      let package = Package(
+        name: "Client",
+        platforms: [.macOS(.v12)],
+        dependencies: [.package(path: "../CustomLayoutBinary")],
+        targets: [.executableTarget(name: "Client", dependencies: [
+          .product(name: "RootKit", package: "CustomLayoutBinary")
+        ])]
+      )
+      """.write(
+      to: client.appendingPathComponent("Package.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "import RootKit\nprint(RootKit.summary())\n".write(
+      to: client.appendingPathComponent("Sources/Client/main.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    let printed = try Shell().run([
+      "swift",
+      "run",
+      "--package-path",
+      client.path,
+      "Client"
+    ])
+    let summary = printed.trimmingCharacters(in: .whitespacesAndNewlines)
+    #expect(summary.hasSuffix("root resource | core resource | extra | 42"))
   }
 }

@@ -32,6 +32,8 @@ public struct MakerOptions: Sendable {
   public var bundleIdentifierPrefix: String = "xcframework-packable"
   public var version: String = "1.0.0"
   public var verbose: Bool = false
+  /// Recorded in `packable-metadata.json`; set when building on demand from a local path.
+  public var sourceFingerprint: String?
 }
 
 public struct MakerResult: Sendable {
@@ -49,8 +51,7 @@ public struct Maker: Sendable {
   /// `log` receives progress lines; by default they go to standard error.
   public init(
     options: MakerOptions,
-    log: @escaping @Sendable (String)
-      -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+    log: @escaping @Sendable (String) -> Void = standardErrorLog
   ) {
     self.options = options
     self.log = log
@@ -177,20 +178,12 @@ public struct Maker: Sendable {
       }
     }
 
-    for (module, bundle) in resourceBundles.sorted(by: { $0.key < $1.key }) {
-      result.warnings
-        .append(
-          "\(module) has resources: \(bundle) is inside its framework. Apps must copy that bundle into their own bundle for Bundle.module to find it."
-        )
-    }
-
     for (module, slices) in frameworks.sorted(by: { $0.key < $1.key })
       where slices.count != platforms.count {
       let missing = platforms.filter { slices[$0] == nil }.map(\.rawValue)
-      result.warnings
-        .append(
-          "\(module) wasn't built for \(missing.joined(separator: ", ")) (platform-conditional dependency); its XCFramework lacks those slices."
-        )
+        .joined(separator: ", ")
+      let reason = "(platform-conditional dependency); its XCFramework lacks those slices."
+      result.warnings.append("\(module) wasn't built for \(missing) \(reason)")
     }
 
     let artifactsDirectory = options.outputDirectory
@@ -205,15 +198,9 @@ public struct Maker: Sendable {
     for (module, slices) in frameworks.sorted(by: { $0.key < $1.key }) {
       log("▸ Creating \(module).xcframework")
       let xcframework = artifactsDirectory.appendingPathComponent("\(module).xcframework")
-      var arguments = ["xcodebuild", "-create-xcframework"]
-      for platform in platforms {
-        if let framework = slices[platform] {
-          arguments += [
-            "-framework",
-            framework.path
-          ] }
-      }
-      try shell.run(arguments + ["-output", xcframework.path], stream: false)
+      let inputs = platforms.compactMap { slices[$0] }.flatMap { ["-framework", $0.path] }
+      let create = ["xcodebuild", "-create-xcframework"] + inputs
+      try shell.run(create + ["-output", xcframework.path], stream: false)
       if options.includeBinarySwiftModules || !options.verifyModuleInterfaces {
         try XCFramework.restoreBinarySwiftModules(
           in: xcframework,
@@ -231,18 +218,8 @@ public struct Maker: Sendable {
         continue
       }
       let archive = artifactsDirectory.appendingPathComponent("\(module).xcframework.zip")
-      try shell.run(
-        [
-          "ditto",
-          "-c",
-          "-k",
-          "--sequesterRsrc",
-          "--keepParent",
-          xcframework.path,
-          archive.path
-        ],
-        stream: false
-      )
+      let ditto = ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent"]
+      try shell.run(ditto + [xcframework.path, archive.path], stream: false)
       try fileManager.removeItem(at: xcframework)
       let checksum = try swiftPM.computeChecksum(of: archive)
       result.artifacts[module] = archive
@@ -272,14 +249,58 @@ public struct Maker: Sendable {
       )
     }
 
+    // Modules with resources get a carrier target, so SwiftPM installs their bundles.
+    let carriersDirectory = options.outputDirectory
+      .appendingPathComponent(ResourceCarrier.folder)
+    try? fileManager.removeItem(at: carriersDirectory)
+    var carriers: [ResourceCarrier] = []
+    var localizations: [String] = []
+    // SwiftPM's resolved resources for the root package; dependencies use a scan.
+    let described = resourceBundles
+      .isEmpty ? [:] : (try? swiftPM.describeResources()) ?? [:]
+    for (module, bundle) in resourceBundles.sorted(by: { $0.key < $1.key }) {
+      guard let entry = index.entries[module] else {
+        continue
+      }
+      let isRoot = entry.package.identity == root.identity
+      let carrier = try ResourceCarrier.make(
+        module: module,
+        target: entry.target,
+        sourceDirectory: entry.package.sourceDirectory(of: entry.target),
+        packageDirectory: options.outputDirectory,
+        resolved: isRoot ? described[entry.target.name] : nil,
+        foreignDirectories: entry.package.foreignDirectories(within: entry.target)
+      )
+      guard let carrier else {
+        let advice = "apps must copy \(bundle) from its framework into their bundle."
+        result.warnings
+          .append("\(module)'s resources aren't declared in its manifest; \(advice)")
+        continue
+      }
+      carriers.append(carrier)
+      localizations += entry.package.manifest.defaultLocalization.map { [$0] } ?? []
+    }
+
     let manifest = options.outputDirectory.appendingPathComponent("Package.swift")
     try BinaryManifest.render(
       packageName: root.manifest.name,
       platforms: root.manifest.platforms,
       products: result.products,
-      artifacts: manifestArtifacts
+      artifacts: manifestArtifacts,
+      defaultLocalization: root.manifest.defaultLocalization ?? localizations.first,
+      resourceCarriers: carriers
     ).write(to: manifest, atomically: true, encoding: .utf8)
     result.manifest = manifest
+
+    let git = GitInfo(directory: options.packageDirectory, shell: shell)
+    try BinaryMetadata(
+      package: root.manifest.name,
+      version: git.version,
+      revision: git.revision,
+      fingerprint: options.sourceFingerprint,
+      modules: frameworks.keys.sorted(),
+      products: result.products.reduce(into: [:]) { $0[$1.name] = $1.modules }
+    ).write(to: options.outputDirectory)
     return result
   }
 

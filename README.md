@@ -68,11 +68,63 @@ Clients only need to point their dependency at this directory (or at the publish
 | `-Xswiftc` / `-Xcc` / `-Xlinker` | Pass flags through to `swift build` |
 | `-v` | Show the full `swift build` output |
 
+## Switching dependencies between source and binary
+
+A client package can declare in `packable.yml` which dependencies it builds from source and which it links as XCFrameworks, and flip them with one command, like the CocoaPods binary plugins.
+
+```yaml
+# packable.yml, next to the client's Package.swift
+dependencies:
+  ShowcaseKit:
+    mode: binary                          # source (default) | binary
+    source: { path: ../ShowcaseKit }      # or { url: https://…, from: 1.2.0 }
+    binary: { path: ../ShowcaseKit-binary }  # optional, see below
+  Alamofire:
+    source: { url: https://github.com/Alamofire/Alamofire.git, from: 5.9.0 }
+```
+
+```bash
+xcframework-packable generate                  # write the dependency block into Package.swift
+xcframework-packable use binary ShowcaseKit    # flip modes in packable.yml, regenerate, clear .build
+xcframework-packable use source --all
+```
+
+`generate` writes a block between `// packable:begin` and `// packable:end` (inserted after `import PackageDescription` the first time). The rest of `Package.swift` stays yours and uses the block's two names, which don't change between modes:
+
+```swift
+let package = Package(
+  name: "App",
+  dependencies: packableDependencies,
+  targets: [
+    .target(name: "App", dependencies: [packable("ShowcaseKit", from: "ShowcaseKit")])
+  ]
+)
+```
+
+Where binaries come from:
+
+- **Declared:** `binary:` points at a binary package, either one this tool generated or a released one at a URL.
+- **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in `~/Library/Caches/xcframework-packable` (override with `cache:` in `packable.yml` or `$XCFRAMEWORK_PACKABLE_CACHE`). Local sources are rebuilt only when their files change. Remote sources are resolved by SwiftPM and cached per version. The manifest refers to the shared cache through `$HOME`, so the same `Package.swift` works on every machine; run `generate` after cloning to fill the cache.
+
+Per-dependency keys for on-demand builds: `products`, `platforms`, `skip-interface-verification`.
+
+Checks:
+
+- **Clean switch:** `use` clears `.build` (keeping checkouts, downloads, the lock file and sourcekit-lsp's `index-build`), because objects left from the other mode break linking. If another SwiftPM process holds the package's lock, the clean is skipped with a warning. In Xcode, also run Product › Clean Build Folder.
+- **Duplicate modules:** a binary package bundles its dependencies' modules. If another entry provides one of them, `generate` stops and names the module (for example, MathUtils both bundled in the ShowcaseKit binary and declared on its own).
+- **Version drift:** for declared binaries, `generate` warns when the binary was built from a different tag or commit than the source points at (from `packable-metadata.json`, written next to every generated binary package).
+- **Rollback:** if regenerating fails, `use` restores `packable.yml`.
+
+## Examples
+
+[`Examples/`](Examples) has a showcase library (Swift + C modules, resources, an `@objc` API, a dependency package), a client app that uses the generated binaries, and a client that switches between source and binary with `packable.yml`. Run `Examples/run-showcase.sh` to see every use case end to end.
+
 ## Notes
 
 - **One XCFramework per module.** Every module a product depends on (C modules and third-party dependency modules included) gets its own XCFramework, and the generated `Package.swift` groups them into a product with the same name. That keeps `import` relationships between modules working in binary form.
-- **Frameworks are static.** A target with resources gets its `<Package>_<Target>.bundle` placed inside the framework, but the client app has to copy that bundle into its own bundle for `Bundle.module` to find it (the tool prints a reminder).
+- **Resources work through the generated package.** For a module with resources, the generated `Package.swift` renames its binary target to `<Module>Binary` and adds a small target named `<Module>` that carries the original resource files (under `Resources/<Module>/`). SwiftPM and Xcode process them for the client's platform and install `<Package>_<Module>.bundle` where the compiled `Bundle.module` looks for it, so nothing has to be copied by hand. Declared `.process`/`.copy` resources are carried, plus the types SwiftPM picks up implicitly (asset catalogs, `.xib`, `.storyboard`, `.lproj`, `.xcstrings`, Core Data and Metal files). The bundle is also inside each static framework, for apps that use an XCFramework directly without the package; those apps must copy it into their bundle themselves.
 - **Interface verification failures.** Some libraries (for example swift-collections 1.7.x) emit `.swiftinterface` files that don't verify with the current compiler. Pass `--skip-interface-verification` in that case; the tool then also keeps the compiled `.swiftmodule` files, so clients using the same compiler version can still import the modules.
+- **Any target layout.** Targets with a custom `path:` (including `path: "."` narrowed with `sources:`/`exclude:`) and the `Source/`, `src/`, `srcs/` default folders work. Resources come from SwiftPM's own resolved list (`swift package describe`), so `exclude:` and implicit resource types match what SwiftPM builds, and only header files are copied into a framework's `Headers/`, even when public headers sit next to sources (`publicHeadersPath: "."`).
 - **Macro and binaryTarget dependencies** aren't packaged yet.
 - Apple platforms only.
 

@@ -9,10 +9,11 @@ let package = Package(
     .library(name: "XcframeworkPackableKit", targets: ["XcframeworkPackableKit"])
   ],
   dependencies: [
-    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0")
+    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
+    .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.0")
   ],
   targets: [
-    .target(name: "XcframeworkPackableKit"),
+    .target(name: "XcframeworkPackableKit", dependencies: ["Yams"]),
     .executableTarget(
       name: "xcframework-packable",
       dependencies: [

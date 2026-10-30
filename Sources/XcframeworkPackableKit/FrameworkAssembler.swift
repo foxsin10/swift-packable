@@ -62,12 +62,13 @@ public struct FrameworkAssembler: Sendable {
           encoding: .utf8
         )
       }
-    case let .clang(publicHeaders):
+    case let .clang(publicHeaders, skipped):
       if let publicHeaders {
         let moduleMap = try ModuleMaps.installClangHeaders(
           from: publicHeaders,
           moduleName: module.name,
-          into: headers
+          into: headers,
+          skipping: skipped
         )
         try moduleMap.write(
           to: modules.appendingPathComponent("module.modulemap"),
@@ -165,18 +166,23 @@ public enum ModuleMaps {
   /// Mirrors SwiftPM's rules: a custom `module.modulemap` is kept as a framework module,
   /// `include/<Name>.h` or `include/<Name>/<Name>.h` becomes the umbrella header, and
   /// otherwise an umbrella header that includes every public header is generated.
+  ///
+  /// Only header files (and a custom module map) are copied, since the public headers
+  /// folder can hold sources too (`publicHeadersPath: "."`). Hidden folders and `skipped`
+  /// folders (excluded paths, nested targets) are left out.
   public static func installClangHeaders(
     from publicHeaders: URL,
     moduleName: String,
-    into headersDirectory: URL
+    into headersDirectory: URL,
+    skipping skipped: [URL] = []
   ) throws -> String {
     let fileManager = FileManager.default
+    try? fileManager.removeItem(at: headersDirectory)
     try fileManager.createDirectory(
-      at: headersDirectory.deletingLastPathComponent(),
+      at: headersDirectory,
       withIntermediateDirectories: true
     )
-    try? fileManager.removeItem(at: headersDirectory)
-    try fileManager.copyItem(at: publicHeaders, to: headersDirectory)
+    try copyHeaders(from: publicHeaders, to: headersDirectory, skipping: skipped)
 
     let customMap = headersDirectory.appendingPathComponent("module.modulemap")
     if fileManager.fileExists(atPath: customMap.path) {
@@ -218,11 +224,44 @@ public enum ModuleMaps {
     }.joined(separator: "\n")
   }
 
+  static let headerExtensions: Set = ["h", "hh", "hpp", "hxx", "inc"]
+
   /// Header paths relative to `directory`, sorted.
   static func headerFiles(in directory: URL) -> [String] {
     guard let enumerator = FileManager.default.enumerator(atPath: directory.path) else {
       return []
     }
     return enumerator.compactMap { $0 as? String }.filter { $0.hasSuffix(".h") }.sorted()
+  }
+
+  private static func copyHeaders(
+    from source: URL,
+    to destination: URL,
+    skipping skipped: [URL]
+  ) throws {
+    let fileManager = FileManager.default
+    guard let enumerator = fileManager.enumerator(atPath: source.path) else {
+      return
+    }
+    let skippedPaths = Set(skipped.map(canonicalPath))
+    while let path = enumerator.nextObject() as? String {
+      let item = source.appendingPathComponent(path)
+      if item.lastPathComponent.hasPrefix(".") || skippedPaths
+        .contains(canonicalPath(item)) {
+        enumerator.skipDescendants()
+        continue
+      }
+      let isHeader = headerExtensions.contains(item.pathExtension)
+      guard isHeader || path == "module.modulemap",
+            enumerator.fileAttributes?[.type] as? FileAttributeType == .typeRegular else {
+        continue
+      }
+      let target = destination.appendingPathComponent(path)
+      try fileManager.createDirectory(
+        at: target.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      try fileManager.copyItem(at: item, to: target)
+    }
   }
 }

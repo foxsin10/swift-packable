@@ -7,7 +7,8 @@ public struct BuiltModule: Sendable {
     /// generated `<Name>-Swift.h`.
     case swift(swiftmodule: URL, objcHeader: URL?)
     /// `publicHeaders` is the target's public headers directory, when it has one.
-    case clang(publicHeaders: URL?)
+    /// `skipping` lists folders in it that belong elsewhere: excluded or other targets.
+    case clang(publicHeaders: URL?, skipping: [URL])
   }
 
   public let name: String
@@ -63,7 +64,10 @@ public struct BuildProductsDirectory: Sendable {
       } else {
         let headers = entry.package.publicHeadersDirectory(of: entry.target)
         let hasHeaders = fileManager.fileExists(atPath: headers.path)
-        kind = .clang(publicHeaders: hasHeaders ? headers : nil)
+        kind = .clang(
+          publicHeaders: hasHeaders ? headers : nil,
+          skipping: entry.package.foreignDirectories(within: entry.target)
+        )
       }
 
       let bundleNames = [entry.package.manifest.name, entry.package.identity]
