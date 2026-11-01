@@ -115,6 +115,10 @@ public struct PackableConfig: Decodable, Sendable {
         Bool.self,
         forKey: .skipInterfaceVerification
       ) ?? false
+      disableLibraryEvolution = try container.decodeIfPresent(
+        Bool.self,
+        forKey: .disableLibraryEvolution
+      ) ?? false
     }
 
     public var mode: Mode
@@ -128,6 +132,7 @@ public struct PackableConfig: Decodable, Sendable {
     /// Framework linkage when building on demand.
     public var linkage: Linkage
     public var skipInterfaceVerification: Bool
+    public var disableLibraryEvolution: Bool
 
     enum CodingKeys: String, CodingKey {
       case mode
@@ -137,6 +142,7 @@ public struct PackableConfig: Decodable, Sendable {
       case platforms
       case linkage
       case skipInterfaceVerification = "skip-interface-verification"
+      case disableLibraryEvolution = "disable-library-evolution"
     }
   }
 

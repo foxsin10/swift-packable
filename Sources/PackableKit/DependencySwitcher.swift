@@ -335,6 +335,7 @@ public struct DependencySwitcher: Sendable {
       return platform
     }
     options.verifyModuleInterfaces = !dependency.skipInterfaceVerification
+    options.libraryEvolution = !dependency.disableLibraryEvolution
     options.linkage = dependency.linkage
     options.rebuild = self.options.rebuild
     options.verbose = self.options.verbose
@@ -360,7 +361,8 @@ public struct DependencySwitcher: Sendable {
       shell: Shell()
     )
     let manifest = try? swiftPM.dumpManifest(at: absoluteURL(path), identity: name)
-    return manifest?.targets.filter(\.isLibrary).map { moduleName(forTarget: $0.name) }
+    return manifest?.targets.filter { $0.isLibrary || $0.isSystemLibrary }
+      .map { moduleName(forTarget: $0.name) }
   }
 
   /// SwiftPM rejects two targets with the same name, which happens when a binary package

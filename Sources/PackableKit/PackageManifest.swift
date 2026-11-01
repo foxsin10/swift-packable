@@ -134,6 +134,12 @@ public struct PackageManifest: Decodable, Sendable {
       type == "regular"
     }
 
+    /// A `.systemLibrary` target: a module map over a library the OS provides, with no
+    /// code of its own.
+    public var isSystemLibrary: Bool {
+      type == "system"
+    }
+
     public var targetDependencies: [Dependency] {
       dependencies ?? []
     }

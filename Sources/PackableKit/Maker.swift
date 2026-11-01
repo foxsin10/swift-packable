@@ -26,6 +26,10 @@ public struct MakerOptions: Sendable {
   /// module even if its interface doesn't compile. Always on when verification is
   /// skipped.
   public var includeBinarySwiftModules: Bool = false
+  /// Builds with `-enable-library-evolution`. When false, the modules aren't resilient, so
+  /// the compiled `.swiftmodule` files are kept too and clients should use the same
+  /// compiler that built them.
+  public var libraryEvolution: Bool = true
   public var extraBuildArguments: [String] = []
   public var zip: Bool = false
   /// When set together with `zip`, the generated manifest points at
@@ -109,6 +113,8 @@ public struct Maker: Sendable {
     var frameworks: [String: [ApplePlatform: URL]] = [:]
     var modulesByProduct: [String: Set<String>] = [:]
     var resourceBundles: [String: String] = [:]
+    // Empty modules nothing imports, logged once.
+    var skippedModules = Set<String>()
     let merger = ArchitectureMerger(shell: shell)
     let scratchRoot = canonicalPath(scratchDirectory) + "/"
 
@@ -126,6 +132,7 @@ public struct Maker: Sendable {
             deploymentTarget: options.deploymentTargets[platform.manifestPlatformName],
             configuration: options.configuration,
             verifyModuleInterfaces: options.verifyModuleInterfaces,
+            libraryEvolution: options.libraryEvolution,
             extraArguments: options.extraBuildArguments
           )
           let binPath = try swiftPM.binPath(for: request)
@@ -148,13 +155,37 @@ public struct Maker: Sendable {
             )
           }
 
-          let modules = try BuildProductsDirectory(url: binPath).modules(index: index)
-          guard !modules.isEmpty else {
+          let productsDirectory = BuildProductsDirectory(url: binPath)
+          let found = try productsDirectory.modules(index: index)
+          guard !found.isEmpty else {
             throw MakerError(
               "Building \(product) for \(platform.rawValue) produced no library modules in \(binPath.path)"
             )
           }
-          for module in modules {
+          let unused = try productsDirectory.unusedEmptyModules(
+            found,
+            keeping: Set(root.manifest.product(named: product)?.targets
+              .map(moduleName(forTarget:)) ?? []),
+            index: index,
+            architecture: architecture,
+            shell: shell
+          )
+          for name in unused.sorted() where skippedModules.insert(name).inserted {
+            log("  skipping \(name): it's empty and no module imports it")
+          }
+          let built = found.filter { !unused.contains($0.name) }
+          let systemLibraries = try index.systemLibraries(usedBy: built.map(\.name))
+            .map { name in
+              try systemLibraryModule(
+                name,
+                index: index,
+                usedBy: built,
+                assembler: assembler,
+                request: request,
+                in: platformStaging.appendingPathComponent("system/\(architecture)")
+              )
+            }
+          for module in built + systemLibraries {
             modulesByProduct[product, default: []].insert(module.name)
             if let bundle = module
               .resourceBundle {
@@ -205,6 +236,11 @@ public struct Maker: Sendable {
       let reason = "(platform-conditional dependency); its XCFramework lacks those slices."
       result.warnings.append("\(module) wasn't built for \(missing) \(reason)")
     }
+    if !options.libraryEvolution {
+      result.warnings.append(
+        "Built without library evolution: clients must use the same Swift compiler as this build."
+      )
+    }
 
     let artifactsDirectory = options.outputDirectory
       .appendingPathComponent("XCFrameworks")
@@ -224,9 +260,13 @@ public struct Maker: Sendable {
         return ["-framework", framework.path] +
           (hasDSYM ? ["-debug-symbols", dSYM.path] : [])
       }
-      let create = ["xcodebuild", "-create-xcframework"] + inputs
+      // Without library evolution there are no interfaces, which xcodebuild only accepts
+      // for frameworks marked as not for public distribution.
+      let internalOnly = options.libraryEvolution ? [] : ["-allow-internal-distribution"]
+      let create = ["xcodebuild", "-create-xcframework"] + inputs + internalOnly
       try shell.run(create + ["-output", xcframework.path], stream: false)
-      if options.includeBinarySwiftModules || !options.verifyModuleInterfaces {
+      if options.includeBinarySwiftModules || !options.verifyModuleInterfaces ||
+        !options.libraryEvolution {
         try XCFramework.restoreBinarySwiftModules(
           in: xcframework,
           module: module,
@@ -351,6 +391,49 @@ public struct Maker: Sendable {
     )
   }
 
+  /// A system library module for one architecture. Its framework holds the target's
+  /// module map and headers, plus an empty object, since an XCFramework needs a binary.
+  /// The object takes the deployment target of a module that uses the library.
+  func systemLibraryModule(
+    _ name: String,
+    index: TargetIndex,
+    usedBy built: [BuiltModule],
+    assembler: FrameworkAssembler,
+    request: SwiftPM.BuildRequest,
+    in directory: URL
+  ) throws -> BuiltModule {
+    guard let entry = index.entries[name],
+          let user = built.first(where: {
+            index.systemLibraries(usedBy: [$0.name]).contains(name)
+          }) else {
+      throw MakerError("\(name) isn't a system library used by this build")
+    }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let object = directory.appendingPathComponent("\(name).o")
+    let minimumOS = try assembler.deploymentTarget(
+      of: user.object,
+      architecture: request.architecture
+    )
+    let triple = request.platform.triple(
+      architecture: request.architecture,
+      deploymentTarget: minimumOS
+    )
+    try shell.run(
+      ["xcrun", "--sdk", request.platform.sdkName, "clang", "-target", triple]
+        + ["-x", "c", "-c", "/dev/null", "-o", object.path],
+      stream: false
+    )
+    return BuiltModule(
+      name: name,
+      object: object,
+      kind: .clang(
+        publicHeaders: entry.package.sourceDirectory(of: entry.target),
+        skipping: entry.package.foreignDirectories(within: entry.target)
+      ),
+      resourceBundle: nil
+    )
+  }
+
   /// The `-Xlinker` pairs of `swift build` arguments (which come in `-X<tool> value`
   /// pairs).
   func linkerFlags(in arguments: [String]) -> [String] {
@@ -382,6 +465,7 @@ public struct Maker: Sendable {
       "linkage:" + options.linkage.rawValue,
       "verify-interfaces:\(options.verifyModuleInterfaces)",
       "binary-swiftmodules:\(options.includeBinarySwiftModules)",
+      "library-evolution:\(options.libraryEvolution)",
       "build-arguments:" + options.extraBuildArguments.joined(separator: "\u{1F}"),
       "zip:\(options.zip)",
       "base-url:" + (options.baseURL ?? ""),
@@ -449,9 +533,19 @@ public struct Maker: Sendable {
   }
 }
 
-/// A path for comparing locations: symlinks resolved, and `/private/tmp` and `/tmp`
-/// treated alike (Foundation strips `/private` only for paths that exist).
+/// A path for comparing locations: symlinks resolved, letter case as on disk, and
+/// `/private/tmp` and `/tmp` treated alike. Foundation only resolves paths that exist, so
+/// the nearest existing folder is resolved and the rest appended.
 func canonicalPath(_ url: URL) -> String {
-  let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+  var existing = url.standardizedFileURL
+  var missing: [String] = []
+  while existing.path != "/", !FileManager.default.fileExists(atPath: existing.path) {
+    missing.insert(existing.lastPathComponent, at: 0)
+    existing.deleteLastPathComponent()
+  }
+  let resolved = missing.reduce(existing.resolvingSymlinksInPath()) {
+    $0.appendingPathComponent($1)
+  }
+  let path = resolved.path
   return path.hasPrefix("/private/") ? String(path.dropFirst("/private".count)) : path
 }

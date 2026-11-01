@@ -7,7 +7,7 @@ The whole pipeline is built on Swift Package Manager's own capabilities:
 | Step | SwiftPM / Xcode capability used |
 | --- | --- |
 | Resolve the dependency graph and read each package's manifest | `swift package show-dependencies --format json`, `swift package dump-package` |
-| Cross-compile for each platform and architecture | `swift build --triple … --sdk …` (Swift Build engine, with library evolution and `.swiftinterface` emission enabled) |
+| Cross-compile for each platform and architecture | `swift build --triple … --sdk …` (Swift Build engine, with library evolution and `.swiftinterface` emission unless `--disable-library-evolution`) |
 | Work out which modules each product actually links | The products folder is emptied before each build; the `<Module>.o` files left afterwards are that product's module closure (remote dependencies included) |
 | Merge architectures | `lipo`, a union of the `.swiftmodule` folders, and `-Swift.h` headers merged the way Xcode does it |
 | Wrap each module in a static or dynamic framework, then combine them into an XCFramework | `libtool -static`, or `swiftc`/`clang` linking against the module's dependency frameworks plus `dsymutil`; then `xcodebuild -create-xcframework` |
@@ -33,7 +33,7 @@ The whole pipeline is built on Swift Package Manager's own capabilities:
 **For apps that use the output**
 
 - **SwiftPM:** generated packages use `swift-tools-version:5.9`, so Xcode 15 / Swift 5.9 or later.
-- **Compiler version:** with library evolution, apps on newer compilers can use the frameworks. Binaries made with `--skip-interface-verification` (or `--include-binary-swiftmodules`) are safest with the same compiler version that built them.
+- **Compiler version:** with library evolution, apps on newer compilers can use the frameworks. Binaries made with `--skip-interface-verification`, `--include-binary-swiftmodules` or `--disable-library-evolution` are safest with the same compiler version that built them.
 
 ## Installation
 
@@ -136,7 +136,9 @@ When the checksum matches the existing output and all of its XCFrameworks are st
 | `--zip` / `--base-url` | Zip each XCFramework, compute its checksum, and generate remote `binaryTarget`s |
 | `--skip-interface-verification` | Skip `.swiftinterface` verification (see below) |
 | `--include-binary-swiftmodules` | Keep the compiled `.swiftmodule` files in the XCFrameworks |
+| `--disable-library-evolution` | Build without `-enable-library-evolution`, for packages that don't compile with it (see below) |
 | `-Xswiftc` / `-Xcc` / `-Xlinker` | Pass flags through to `swift build` (`-Xlinker` also reaches the dylib link with `--linkage dynamic`) |
+| `--scratch-path` | SwiftPM's working folder (default `<package>/.build/packable`). When it's new and the package's `.build` already has resolved dependencies, their checkouts, repositories and artifacts are copied in as APFS clones, so they take no extra disk space. Elsewhere, or if SwiftPM rejects the copy, dependencies are resolved as usual. To reclaim an existing scratch folder's duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json` |
 | `--rebuild` | Build even when the build checksum shows the output is up to date (see [Skipping unchanged builds](#skipping-unchanged-builds)) |
 | `-v` | Show the full `swift build` output |
 
@@ -184,8 +186,9 @@ Dependency entry:
 | `platforms` | no | the source manifest's platforms | Slices to build on demand: `macos`, `maccatalyst`, `ios`, `ios-simulator`, `tvos`, `tvos-simulator`, `watchos`, `watchos-simulator`, `visionos`, `visionos-simulator`. SDK names (`iphoneos`, `iphonesimulator`, `appletvos`, `appletvsimulator`, `watchsimulator`, `xros`, `xrsimulator`) also work. A manifest with no `platforms:` builds macOS + iOS. |
 | `linkage` | no | `static` | `static` or `dynamic` frameworks when building on demand. The two are cached separately. |
 | `skip-interface-verification` | no | `false` | Skip `.swiftinterface` verification when building on demand. |
+| `disable-library-evolution` | no | `false` | Build without library evolution when building on demand. |
 
-`products`, `platforms`, `linkage` and `skip-interface-verification` only apply to binaries built on demand. A declared `binary:` is used as it is.
+`products`, `platforms`, `linkage`, `skip-interface-verification` and `disable-library-evolution` only apply to binaries built on demand. A declared `binary:` is used as it is.
 
 #### Locations
 
@@ -252,9 +255,11 @@ Static frameworks remain the default, since each dynamic framework adds a little
 
 ## Notes
 
-- **One XCFramework per module.** Every module a product depends on (C modules and third-party dependency modules included) gets its own XCFramework, and the generated `Package.swift` groups them into a product with the same name. That keeps `import` relationships between modules working in binary form.
+- **One XCFramework per module.** Every module a product depends on (C modules and third-party dependency modules included) gets its own XCFramework, and the generated `Package.swift` groups them into a product with the same name. That keeps `import` relationships between modules working in binary form. Link all of a product's XCFrameworks into an app, not only the top-level one. Empty modules that nothing imports, such as the `Sharing1`/`Sharing2` version markers in swift-sharing, are left out: they have no code, and SwiftPM's dependency scans show no module needs them. A product's own targets are always kept, and if a scan is missing nothing is left out. Code that checks `#if canImport(Sharing2)` against the binaries sees `false`.
+- **System library targets.** A `.systemLibrary` target that a packaged module depends on (for example `GRDBSQLite` in GRDB) gets an XCFramework with its module map, headers and an empty binary, because modules whose interface imports it can't compile without it. Its `link` directive still links the system library.
 - **Resources work through the generated package.** For a static module with resources, the generated `Package.swift` renames its binary target to `<Module>Binary` and adds a small target named `<Module>` that carries the original resource files (under `Resources/<Module>/`). SwiftPM and Xcode process them for the client's platform and install `<Package>_<Module>.bundle` where the compiled `Bundle.module` looks for it, so nothing has to be copied by hand. Declared `.process`/`.copy` resources are carried, plus the types SwiftPM picks up implicitly (asset catalogs, `.xib`, `.storyboard`, `.lproj`, `.xcstrings`, Core Data and Metal files). The bundle is also inside each static framework, for apps that use an XCFramework directly without the package; those apps must copy it into their bundle themselves.
 - **Interface verification failures.** Some libraries (for example swift-collections 1.7.x) emit `.swiftinterface` files that don't verify with the current compiler. Pass `--skip-interface-verification` in that case; the tool then also keeps the compiled `.swiftmodule` files, so clients using the same compiler version can still import the modules.
+- **Packages that don't compile with library evolution.** Some code builds normally but fails with `-enable-library-evolution`. Pass `--disable-library-evolution` to build without it. The modules are then not resilient, so no `.swiftinterface` files are emitted (the compiler only supports them with library evolution): each framework carries the compiled `.swiftmodule` files, the XCFrameworks are created with `-allow-internal-distribution`, and the tool warns that clients must use the same Swift compiler as the build. On another compiler they fail to import. `--skip-interface-verification` has no effect in this mode.
 - **Any target layout.** Targets with a custom `path:` (including `path: "."` narrowed with `sources:`/`exclude:`) and the `Source/`, `src/`, `srcs/` default folders work. Resources come from SwiftPM's own resolved list (`swift package describe`), so `exclude:` and implicit resource types match what SwiftPM builds, and only header files are copied into a framework's `Headers/`, even when public headers sit next to sources (`publicHeadersPath: "."`).
 - **Macro and binaryTarget dependencies** aren't packaged yet.
 - Apple platforms only.

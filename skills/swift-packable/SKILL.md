@@ -41,8 +41,9 @@ swift-packable path/to/MyPackage --zip --base-url https://example.com/releases/1
 | `--zip` / `--base-url` | Zip each XCFramework with its checksum; `--base-url` (requires `--zip`) makes the generated manifest use `url:` + `checksum:`. |
 | `--skip-interface-verification` | When emitted `.swiftinterface` files don't verify. Also keeps compiled `.swiftmodule`s. |
 | `--include-binary-swiftmodules` | Keep compiled `.swiftmodule`s without skipping verification. |
+| `--disable-library-evolution` | When the package doesn't compile with `-enable-library-evolution`. No `.swiftinterface`s are emitted, only compiled `.swiftmodule`s (so `--skip-interface-verification` isn't needed); clients must use the same compiler. |
 | `--bundle-id-prefix`, `--framework-version` | `CFBundleIdentifier` prefix (default `packable`) and bundle version (default `1.0.0`). |
-| `--scratch-path` | Default `<package>/.build/packable`. |
+| `--scratch-path` | Default `<package>/.build/packable`. A new one is seeded from the package's `.build` dependencies as APFS clones (no extra disk). To reclaim an old duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json`. |
 | `-Xswiftc`, `-Xcc`, `-Xlinker` | Pass-through flags (`-Xlinker` also reaches the dylib link with `--linkage dynamic`). |
 | `--rebuild` | Build even when the output is up to date (see below). |
 | `-v` | Stream `swift build` output. Use it when a build fails. |
@@ -53,7 +54,7 @@ Output:
 MyPackage-binary/
 ├── Package.swift            # same library product names, all binaryTargets
 └── XCFrameworks/
-    ├── MyLib.xcframework    # one XCFramework per module, dependency and C modules included
+    ├── MyLib.xcframework    # one XCFramework per module: dependency, C and system library modules included
     └── MyLibCore.xcframework
 ```
 
@@ -63,7 +64,8 @@ Clients point their dependency at that folder (or the published URL) instead of 
 
 What is handled for you:
 
-- **Module closure.** Each product's XCFrameworks are the modules it actually links, remote dependencies included.
+- **Module closure.** Each product's XCFrameworks are the modules it actually links, remote dependencies included. Link all of them into an app, not only the top-level one. Empty modules nothing imports (e.g. swift-sharing's `Sharing1`/`Sharing2` version markers) are left out and logged as `skipping <Module>`; `#if canImport(...)` on them is then false.
+- **System library targets** (`.systemLibrary`, e.g. GRDB's `GRDBSQLite`) that a packaged module depends on get an XCFramework with the module map, headers and an empty binary, so interfaces that import them compile.
 - **Resources.** For a static module with resources, the generated manifest renames the binary target to `<Module>Binary` and adds a carrier target `<Module>` holding the resource files, so `Bundle.module` works. Dynamic frameworks keep the bundle inside the framework and need no carrier.
 - **Any target layout.** Custom `path:`, `sources:`/`exclude:`, `Source/`, `src/`, `srcs/`, `publicHeadersPath: "."`.
 - **Dynamic frameworks** link their dependency frameworks via `@rpath`, carry dSYMs, and set `MinimumOSVersion` outside macOS.
@@ -99,6 +101,7 @@ Binary mode uses `binary:` when declared; otherwise it packages `source` with th
 | `xcodebuild -create-xcframework` fails / not found | Command Line Tools are selected. `sudo xcode-select -s /Applications/Xcode.app`. |
 | A platform slice fails to build | Its SDK is missing: `xcodebuild -showsdks`, then `xcodebuild -downloadPlatform iOS` (or tvOS, watchOS, visionOS). |
 | Interface verification error (e.g. swift-collections 1.7.x) | Rebuild with `--skip-interface-verification` (`skip-interface-verification: true` in `packable.yml`). Clients should then use the same compiler version. |
+| Compile error only with library evolution (passes with plain `swift build`) | Rebuild with `--disable-library-evolution` (`disable-library-evolution: true` in `packable.yml`). Clients must then use the same compiler version. |
 | Link errors right after switching modes | Stale objects. `use` cleans `.build` unless `--no-clean` or another SwiftPM process held the lock (it warns); in Xcode also Product › Clean Build Folder. |
 | Hand edits inside `// packable:begin … end` disappear | That block is regenerated. Change `packable.yml` and rerun `generate`. |
 | `generate` stops naming a duplicate module | A binary already bundles a module that another entry also provides. Drop the separate entry, or keep both from source. |

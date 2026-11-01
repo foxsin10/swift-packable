@@ -368,7 +368,15 @@ struct DynamicLinkingTests {
     let index = try index()
     #expect(index.directDependencies(of: "Kit") == ["KitCore", "Remote"])
     #expect(index.directDependencies(of: "kit_tool") == ["KitCore"])
-    #expect(index.directDependencies(of: "RemoteCore") == [])
+    #expect(index.directDependencies(of: "RemoteCore") == ["RemoteSQLite"])
+  }
+
+  @Test func findsSystemLibrariesInTheDependencyClosure() throws {
+    let index = try index()
+    // Kit reaches RemoteSQLite through the Remote product and RemoteCore.
+    #expect(index.systemLibraries(usedBy: ["Kit"]) == ["RemoteSQLite"])
+    #expect(index.systemLibraries(usedBy: ["KitCore"]) == [])
+    #expect(index.entries["RemoteSQLite"]?.target.isSystemLibrary == true)
   }
 
   @Test func ordersDependenciesFirstWithTransitiveClosure() throws {
@@ -422,6 +430,29 @@ struct DynamicLinkingTests {
     #expect(maker.linkerFlags(in: arguments) == ["-Xlinker", "-x"])
   }
 
+  @Test(arguments: [true, false])
+  func libraryEvolutionIsOptional(libraryEvolution: Bool) throws {
+    let swiftPM = SwiftPM(
+      packageDirectory: URL(fileURLWithPath: "/p"),
+      scratchDirectory: URL(fileURLWithPath: "/s"),
+      shell: Shell()
+    )
+    let request = SwiftPM.BuildRequest(
+      platform: .macOS,
+      architecture: "arm64",
+      deploymentTarget: nil,
+      configuration: "release",
+      verifyModuleInterfaces: false,
+      libraryEvolution: libraryEvolution,
+      extraArguments: []
+    )
+    let arguments = try swiftPM.buildArguments(for: request)
+    #expect(arguments.contains("-enable-library-evolution") == libraryEvolution)
+    // Interfaces need library evolution; without it the compiler only warns about them.
+    #expect(arguments.contains("--enable-parseable-module-interfaces") == libraryEvolution)
+    #expect(arguments.contains("-no-verify-emitted-module-interface") == libraryEvolution)
+  }
+
   /// Kit depends on KitCore and on Remote's `RemoteLib` product, which pulls in
   /// RemoteCore; KitTool is a plain dependency of nothing.
   private func index() throws -> TargetIndex {
@@ -445,7 +476,8 @@ struct DynamicLinkingTests {
        "products":[{"name":"RemoteLib","targets":["Remote"],"type":{"library":["automatic"]}}],
        "targets":[
          {"name":"Remote","type":"regular","dependencies":[{"byName":["RemoteCore",null]}]},
-         {"name":"RemoteCore","type":"regular"}]}
+         {"name":"RemoteCore","type":"regular","dependencies":[{"target":["RemoteSQLite",null]}]},
+         {"name":"RemoteSQLite","type":"system"}]}
       """#
     func package(_ identity: String, _ json: String) throws -> ResolvedPackage {
       try ResolvedPackage(
@@ -560,5 +592,199 @@ struct BuildChecksumTests {
 
     try write("let b = 2", to: dependency.appendingPathComponent("Dependency.swift"))
     #expect(both() != original)
+  }
+}
+
+struct CanonicalPathTests {
+  /// File paths on macOS ignore case, and a folder that doesn't exist yet must compare
+  /// the same way as its existing parent.
+  @Test func matchesMissingPathsUnderAnExistingFolderTypedInAnotherCase() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appendingPathComponent("Scratch")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let typed = root.appendingPathComponent("scratch")
+    let missing = typed.appendingPathComponent("out/Products")
+    #expect(canonicalPath(missing).hasPrefix(canonicalPath(folder) + "/"))
+    #expect(canonicalPath(missing).hasSuffix("/Scratch/out/Products"))
+  }
+}
+
+struct ScratchSeedTests {
+  /// A package's `.build` after `swift package resolve`: checkouts, the bare repositories
+  /// they came from, a downloaded artifact, and SwiftPM's state pointing at it.
+  private func resolvedPackage(in root: URL) throws -> URL {
+    let build = root.appendingPathComponent("Pkg/.build")
+    for file in ["checkouts/dep/Package.swift", "repositories/dep-1234/HEAD",
+                 "artifacts/dep/tool/tool.artifactbundle/info.json"] {
+      let url = build.appendingPathComponent(file)
+      try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      try file.write(to: url, atomically: true, encoding: .utf8)
+    }
+    let state = """
+      {"object":{"artifacts":[{"path":"\(build.path)/artifacts/dep/tool/tool.artifactbundle",\
+      "targetName":"tool"}],"dependencies":[{"subpath":"dep"}],"prebuilts":[]},"version":7}
+      """
+    try state.write(
+      to: build.appendingPathComponent("workspace-state.json"),
+      atomically: true,
+      encoding: .utf8
+    )
+    return build.deletingLastPathComponent()
+  }
+
+  @Test func clonesResolvedDependenciesIntoAnEmptyScratchFolder() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let package = try resolvedPackage(in: root)
+    let scratch = package.appendingPathComponent(".build/packable")
+
+    let seed = ScratchSeed(packageDirectory: package, scratchDirectory: scratch, shell: Shell())
+    #expect(seed.plant())
+
+    for file in ["checkouts/dep/Package.swift", "repositories/dep-1234/HEAD",
+                 "artifacts/dep/tool/tool.artifactbundle/info.json"] {
+      #expect(FileManager.default.fileExists(atPath: scratch.appendingPathComponent(file).path))
+    }
+    let state = try String(
+      contentsOf: scratch.appendingPathComponent("workspace-state.json"),
+      encoding: .utf8
+    )
+    // Artifacts point into the scratch folder, not the package's own .build.
+    #expect(state.contains("\"\(scratch.path)/artifacts/dep/tool/tool.artifactbundle\""))
+    #expect(state.contains(#""subpath" : "dep""#))
+  }
+
+  @Test func leavesAnAlreadyResolvedScratchFolderAlone() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let package = try resolvedPackage(in: root)
+    let scratch = root.appendingPathComponent("scratch")
+    try FileManager.default.createDirectory(
+      at: scratch.appendingPathComponent("checkouts"),
+      withIntermediateDirectories: true
+    )
+
+    let seed = ScratchSeed(packageDirectory: package, scratchDirectory: scratch, shell: Shell())
+    #expect(!seed.plant())
+    #expect(!FileManager.default.fileExists(atPath: scratch.appendingPathComponent("repositories").path))
+  }
+
+  @Test func doesNothingWithoutResolvedDependenciesOrWhenScratchIsBuild() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let empty = root.appendingPathComponent("Empty")
+    try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+    let scratch = empty.appendingPathComponent(".build/packable")
+    #expect(!ScratchSeed(packageDirectory: empty, scratchDirectory: scratch, shell: Shell()).plant())
+
+    let package = try resolvedPackage(in: root)
+    let build = package.appendingPathComponent(".build")
+    #expect(!ScratchSeed(packageDirectory: package, scratchDirectory: build, shell: Shell()).plant())
+  }
+
+  @Test func removesWhatItPlanted() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let package = try resolvedPackage(in: root)
+    let scratch = root.appendingPathComponent("scratch")
+    let seed = ScratchSeed(packageDirectory: package, scratchDirectory: scratch, shell: Shell())
+    #expect(seed.plant())
+    seed.remove()
+    for item in ScratchSeed.items + ["workspace-state.json"] {
+      #expect(!FileManager.default.fileExists(atPath: scratch.appendingPathComponent(item).path))
+    }
+    // The package's own .build is untouched.
+    #expect(FileManager.default.fileExists(
+      atPath: package.appendingPathComponent(".build/checkouts/dep/Package.swift").path
+    ))
+  }
+}
+
+struct UnusedModuleTests {
+  /// Swift Build's layout for one build: objects in `Products`, dependency scans in
+  /// `Intermediates.noindex`. App imports Used; Marker and Code aren't imported.
+  private func build(in root: URL, scanApp: Bool = true) throws
+    -> (BuildProductsDirectory, [BuiltModule], TargetIndex) {
+    let products = root.appendingPathComponent("out/Products/Release")
+    try FileManager.default.createDirectory(at: products, withIntermediateDirectories: true)
+    let shell = Shell()
+    func object(_ name: String, source: String) throws -> URL {
+      let c = root.appendingPathComponent("\(name).c")
+      try source.write(to: c, atomically: true, encoding: .utf8)
+      let o = products.appendingPathComponent("\(name).o")
+      try shell.run(["xcrun", "clang", "-c", c.path, "-o", o.path], stream: false)
+      return o
+    }
+    let modules = try [
+      ("App", "int app(void) { return 1; }"),
+      ("Used", ""),
+      ("Marker", ""),
+      ("Code", "int code(void) { return 2; }")
+    ].map { name, source in
+      try BuiltModule(
+        name: name,
+        object: object(name, source: source),
+        kind: .swift(swiftmodule: products.appendingPathComponent("\(name).swiftmodule"), objcHeader: nil),
+        resourceBundle: nil
+      )
+    }
+    for (module, imports) in [("App", ["Used", "Swift"]), ("Used", ["Swift"]),
+                              ("Marker", ["Swift"]), ("Code", ["Swift"])]
+      where scanApp || module != "App" {
+      let objects = root.appendingPathComponent(
+        "out/Intermediates.noindex/pkg.build/Release/\(module)-t.build/Objects-normal/arm64"
+      )
+      try FileManager.default.createDirectory(at: objects, withIntermediateDirectories: true)
+      let json = "[" + imports.map { #"{"moduleName":"\#($0)","isFramework":false}"# }
+        .joined(separator: ",") + "]"
+      try json.write(
+        to: objects.appendingPathComponent("\(module)-dependencies-1.json"),
+        atomically: true,
+        encoding: .utf8
+      )
+    }
+    let manifest = #"""
+      {"name":"Pkg","platforms":[],"products":[],
+       "targets":[{"name":"App","type":"regular"},{"name":"Used","type":"regular"},
+                  {"name":"Marker","type":"regular"},{"name":"Code","type":"regular"}]}
+      """#
+    let index = try TargetIndex(packages: [ResolvedPackage(
+      identity: "pkg",
+      directory: root,
+      manifest: JSONDecoder().decode(PackageManifest.self, from: Data(manifest.utf8))
+    )])
+    return (BuildProductsDirectory(url: products), modules, index)
+  }
+
+  @Test func dropsOnlyEmptyModulesNothingImports() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (directory, modules, index) = try build(in: root)
+    let unused = try directory.unusedEmptyModules(
+      modules,
+      keeping: ["App"],
+      index: index,
+      architecture: "arm64",
+      shell: Shell()
+    )
+    #expect(unused == ["Marker"])
+  }
+
+  @Test func keepsEverythingWhenAScanIsMissing() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (directory, modules, index) = try build(in: root, scanApp: false)
+    let unused = try directory.unusedEmptyModules(
+      modules,
+      keeping: ["App"],
+      index: index,
+      architecture: "arm64",
+      shell: Shell()
+    )
+    #expect(unused.isEmpty)
   }
 }

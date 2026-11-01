@@ -9,13 +9,14 @@ struct SwiftPackable: ParsableCommand {
     abstract: "Build a Swift package's library products into XCFrameworks with SwiftPM.",
     discussion: """
       swift-packable compiles every module of the selected products with `swift build` \
-      (one run per platform, with library evolution and module interfaces enabled), \
+      (one run per platform, with library evolution and module interfaces enabled \
+      unless --disable-library-evolution), \
       wraps each module in a static (or, with --linkage dynamic, dynamic) framework, \
       merges the platforms with \
       `xcodebuild -create-xcframework`, and writes a Package.swift that exposes the \
       results as binary targets.
       """,
-    version: "0.1.0",
+    version: "0.2.0",
     subcommands: [Build.self, List.self, Generate.self, Use.self],
     defaultSubcommand: Build.self
   )
@@ -90,6 +91,12 @@ struct Build: ParsableCommand {
     help: "Keep compiled .swiftmodule files next to the interfaces (implied by --skip-interface-verification)."
   )
   var includeBinarySwiftmodules = false
+
+  @Flag(help: ArgumentHelp(
+    "Build without -enable-library-evolution, for packages that don't compile with it.",
+    discussion: "The modules aren't resilient, so no .swiftinterface files are emitted: the frameworks carry only compiled .swiftmodule files, and clients must use the same Swift compiler."
+  ))
+  var disableLibraryEvolution = false
 
   @Flag(help: "Zip each XCFramework and record its SwiftPM checksum.")
   var zip = false
@@ -171,6 +178,7 @@ struct Build: ParsableCommand {
     options.linkage = linkage
     options.verifyModuleInterfaces = !skipInterfaceVerification
     options.includeBinarySwiftModules = includeBinarySwiftmodules
+    options.libraryEvolution = !disableLibraryEvolution
     options.extraBuildArguments = swiftcFlags.flatMap { ["-Xswiftc", $0] }
       + ccFlags.flatMap { ["-Xcc", $0] }
       + linkerFlags.flatMap { ["-Xlinker", $0] }

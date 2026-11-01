@@ -244,7 +244,7 @@ public struct FrameworkAssembler: Sendable {
   }
 
   /// The `minos` of an object's `LC_BUILD_VERSION`, e.g. `15.0`.
-  private func deploymentTarget(of object: URL, architecture: String) throws -> String {
+  func deploymentTarget(of object: URL, architecture: String) throws -> String {
     let output = try shell.run(
       ["xcrun", "vtool", "-arch", architecture, "-show-build", object.path],
       stream: false

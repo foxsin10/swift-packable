@@ -13,6 +13,7 @@ struct PackableConfigTests {
           products: [Kit]
           platforms: [ios, ios-simulator]
           skip-interface-verification: true
+          disable-library-evolution: true
           linkage: dynamic
         Remote:
           source: { url: https://github.com/org/Remote.git, up-to-next-minor: 2.1.0 }
@@ -23,10 +24,12 @@ struct PackableConfigTests {
     #expect(kit.binary?.packageName == "kit-binary")
     #expect(kit.products == ["Kit"])
     #expect(kit.skipInterfaceVerification)
+    #expect(kit.disableLibraryEvolution)
     #expect(kit.linkage == .dynamic)
     let remote = try #require(config.dependencies["Remote"])
     #expect(remote.mode == .source)
     #expect(remote.linkage == .static)
+    #expect(!remote.disableLibraryEvolution)
     #expect(remote.source.packageName == "Remote")
     #expect(remote.source.requirementArguments == ".upToNextMinor(from: \"2.1.0\")")
   }

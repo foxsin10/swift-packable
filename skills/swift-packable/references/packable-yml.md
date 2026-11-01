@@ -38,6 +38,7 @@ dependencies:
 | `platforms` | no | source manifest's platforms | On-demand builds only. `macos`, `maccatalyst`, `ios`, `ios-simulator`, `tvos`, `tvos-simulator`, `watchos`, `watchos-simulator`, `visionos`, `visionos-simulator`; SDK aliases `iphoneos`, `iphonesimulator`, `appletvos`, `appletvsimulator`, `watchsimulator`, `xros`, `xrsimulator`. |
 | `linkage` | no | `static` | On-demand builds only. `static` or `dynamic`; cached separately. |
 | `skip-interface-verification` | no | `false` | On-demand builds only. |
+| `disable-library-evolution` | no | `false` | On-demand builds only. Builds without `-enable-library-evolution` and without `.swiftinterface`s; clients must use the same compiler. |
 
 ## Locations
 

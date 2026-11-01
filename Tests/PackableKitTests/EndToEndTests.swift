@@ -29,12 +29,12 @@ import Testing
 
     let result = try Maker(options: options, log: { _ in }).run()
 
-    #expect(result.artifacts.keys.sorted() == ["CDemo", "Demo", "DemoCore", "DemoExtras"])
+    #expect(result.artifacts.keys.sorted() == ["CDemo", "CZlib", "Demo", "DemoCore", "DemoExtras"])
     #expect(result.products == [
-      .init(name: "Demo", modules: ["Demo", "CDemo", "DemoCore"]),
+      .init(name: "Demo", modules: ["Demo", "CDemo", "CZlib", "DemoCore"]),
       .init(name: "DemoExtras", modules: ["DemoExtras", "DemoCore"])
     ])
-    #expect(result.checksums.count == 4)
+    #expect(result.checksums.count == 5)
     #expect(result.warnings.isEmpty)
 
     let binaryPackage = work.appendingPathComponent("DemoBinary")
@@ -61,7 +61,7 @@ import Testing
     // Universal macOS slice, merged -Swift.h, framework module map for the C target.
     let shell = Shell()
     let unzipped = work.appendingPathComponent("unzipped")
-    for module in ["Demo", "CDemo", "DemoExtras"] {
+    for module in ["Demo", "CDemo", "CZlib", "DemoExtras"] {
       try shell.run([
         "ditto",
         "-x",
@@ -96,6 +96,16 @@ import Testing
       encoding: .utf8
     )
     #expect(cModuleMap.contains("framework module CDemo"))
+    // The system library keeps its module map, so `link "z"` still reaches clients.
+    let systemModuleMap = try String(
+      contentsOf: unzipped
+        .appendingPathComponent(
+          "CZlib.xcframework/ios-arm64-simulator/CZlib.framework/Modules/module.modulemap"
+        ),
+      encoding: .utf8
+    )
+    #expect(systemModuleMap.contains("framework module CZlib [system]"))
+    #expect(systemModuleMap.contains(#"link "z""#))
 
     // A client package can depend on the generated Package.swift and run.
     let client = work.appendingPathComponent("Client")
@@ -124,7 +134,11 @@ import Testing
       import CDemo
       import Demo
       import DemoExtras
-      print(Demo.answer(), Greeter().greeting(), Extras.doubled(), cdemo_add(2, 3))
+      // Demo.checksum calls zlib through the CZlib system library module.
+      print(
+        Demo.answer(), Greeter().greeting(), Extras.doubled(), cdemo_add(2, 3),
+        Demo.checksum("hello")
+      )
       // Read from DemoExtras' resource bundle, which SwiftPM installs from the carrier target.
       print(Extras.message() ?? "missing")
       """.write(
@@ -144,7 +158,7 @@ import Testing
       in: client
     )
     #expect(output.trimmingCharacters(in: .whitespacesAndNewlines)
-      .hasSuffix("42 answer=42 82 5\nhello from resources"))
+      .hasSuffix("42 answer=42 82 5 907060870\nhello from resources"))
 
     let simulatorSDK = try shell.run([
       "xcrun",
@@ -161,6 +175,82 @@ import Testing
       ],
       in: client
     )
+  }
+}
+
+/// Without library evolution there are no module interfaces: the XCFrameworks carry the
+/// compiled `.swiftmodule` files, and a client built by the same compiler uses them.
+@Suite(.serialized) struct NoLibraryEvolutionEndToEndTests {
+  @Test(.timeLimit(.minutes(10)))
+  func packagesCompiledModulesOnly() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let fixture = try #require(Bundle.module.url(
+      forResource: "Fixtures/Demo",
+      withExtension: nil
+    ))
+    let source = work.appendingPathComponent("Demo")
+    try FileManager.default.copyItem(at: fixture, to: source)
+
+    var options = MakerOptions(
+      packageDirectory: source,
+      outputDirectory: work.appendingPathComponent("DemoBinary")
+    )
+    options.scratchDirectory = work.appendingPathComponent("scratch")
+    options.products = ["Demo"]
+    options.platforms = [.macOS]
+    options.architectures = [.macOS: ["arm64"]]
+    options.libraryEvolution = false
+    let result = try Maker(options: options, log: { _ in }).run()
+    #expect(result.warnings == [
+      "Built without library evolution: clients must use the same Swift compiler as this build."
+    ])
+
+    // DemoMarker is empty and nothing imports it, so it isn't packaged.
+    #expect(result.products == [.init(name: "Demo", modules: ["Demo", "CDemo", "CZlib", "DemoCore"])])
+    #expect(result.artifacts["DemoMarker"] == nil)
+
+    let module = try #require(result.artifacts["Demo"])
+      .appendingPathComponent("macos-arm64/Demo.framework/Modules/Demo.swiftmodule")
+    let files = try FileManager.default.contentsOfDirectory(atPath: module.path)
+    #expect(files.contains("arm64-apple-macos.swiftmodule"))
+    #expect(!files.contains { $0.hasSuffix(".swiftinterface") })
+
+    let client = work.appendingPathComponent("Client")
+    try FileManager.default.createDirectory(
+      at: client.appendingPathComponent("Sources/Client"),
+      withIntermediateDirectories: true
+    )
+    try """
+      // swift-tools-version:5.9
+      import PackageDescription
+      let package = Package(
+          name: "Client",
+          platforms: [.macOS(.v12)],
+          dependencies: [.package(path: "../DemoBinary")],
+          targets: [.executableTarget(name: "Client", dependencies: [
+              .product(name: "Demo", package: "DemoBinary"),
+          ])]
+      )
+      """.write(
+      to: client.appendingPathComponent("Package.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try """
+      import Demo
+      print(Demo.answer(), Demo.checksum("hello"))
+      """.write(
+      to: client.appendingPathComponent("Sources/Client/main.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    let output = try Shell().run(
+      ["swift", "run", "--scratch-path", work.appendingPathComponent("client-scratch").path,
+       "Client"],
+      in: client
+    )
+    #expect(output.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("42 907060870"))
   }
 }
 
@@ -271,7 +361,7 @@ private func expectDynamicFrameworks(in unzipped: URL, shell: Shell) throws {
       == ".package(path: \".build/packable-cache/Demo/local/Demo-binary\")")
     let built = client
       .appendingPathComponent(".build/packable-cache/Demo/local/Demo-binary")
-    #expect(BinaryMetadata.read(from: built)?.modules == ["CDemo", "Demo", "DemoCore"])
+    #expect(BinaryMetadata.read(from: built)?.modules == ["CDemo", "CZlib", "Demo", "DemoCore"])
     // Clearing .build keeps the cache the manifest points at.
     try switcher.cleanBuildProducts()
     #expect(BinaryMetadata.read(from: built) != nil)

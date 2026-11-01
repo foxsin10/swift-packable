@@ -18,12 +18,14 @@ public struct BuiltModule: Sendable {
   public let resourceBundle: URL?
 }
 
-/// Library targets of all packages in the graph, keyed by module name.
+/// Library and system library targets of all packages in the graph, keyed by module
+/// name.
 public struct TargetIndex: Sendable {
   public init(packages: [ResolvedPackage]) {
     self.packages = packages
     for package in packages {
-      for target in package.manifest.targets where target.isLibrary {
+      for target in package.manifest.targets
+        where target.isLibrary || target.isSystemLibrary {
         entries[moduleName(forTarget: target.name)] = Entry(
           package: package,
           target: target
@@ -68,6 +70,20 @@ public struct TargetIndex: Sendable {
     var seen = Set<String>()
     return targets.map(moduleName(forTarget:))
       .filter { entries[$0] != nil && seen.insert($0).inserted }
+  }
+
+  /// System library modules that `modules` depend on, directly or transitively, sorted.
+  /// SwiftPM builds nothing for them, but clients need their module maps to import
+  /// any module whose interface imports them.
+  public func systemLibraries(usedBy modules: some Sequence<String>) -> [String] {
+    var seen = Set<String>()
+    var pending = Array(modules)
+    while let module = pending.popLast() {
+      for dependency in directDependencies(of: module) where seen.insert(dependency).inserted {
+        pending.append(dependency)
+      }
+    }
+    return seen.filter { entries[$0]?.target.isSystemLibrary == true }.sorted()
   }
 
   /// `modules` ordered so that each comes after the modules it depends on (directly or
@@ -147,6 +163,79 @@ public struct BuildProductsDirectory: Sendable {
         resourceBundle: bundle
       )
     }
+  }
+
+  /// Every module that the Swift modules in `modules` needed to compile, transitively,
+  /// read from the dependency scans Swift Build keeps for explicit module builds
+  /// (`<Target>-t.build/Objects-normal/<arch>/<Module>-dependencies-<n>.json`). `nil` when
+  /// a Swift module has no scan, since then nothing can be ruled out.
+  func importedModules(
+    of modules: [BuiltModule],
+    index: TargetIndex,
+    architecture: String
+  ) -> Set<String>? {
+    struct ScannedModule: Decodable {
+      let moduleName: String
+    }
+    let fileManager = FileManager.default
+    let intermediates = url.deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("Intermediates.noindex")
+    // Package folders are named by Swift Build, so every one is searched.
+    let packageFolders = ((try? fileManager.contentsOfDirectory(atPath: intermediates.path)) ?? [])
+      .filter { $0.hasSuffix(".build") }
+    var imported = Set<String>()
+    for module in modules {
+      guard case .swift = module.kind, let entry = index.entries[module.name] else {
+        continue
+      }
+      let scans = packageFolders.flatMap { folder in
+        let objects = intermediates.appendingPathComponent(folder)
+          .appendingPathComponent(url.lastPathComponent)
+          .appendingPathComponent("\(entry.target.name)-t.build/Objects-normal/\(architecture)")
+        let files = (try? fileManager.contentsOfDirectory(atPath: objects.path)) ?? []
+        return files
+          .filter { $0.hasPrefix("\(module.name)-dependencies-") && $0.hasSuffix(".json") }
+          .map { objects.appendingPathComponent($0) }
+      }
+      guard !scans.isEmpty else {
+        return nil
+      }
+      for scan in scans {
+        guard let data = try? Data(contentsOf: scan),
+              let entries = try? JSONDecoder().decode([ScannedModule].self, from: data) else {
+          return nil
+        }
+        imported.formUnion(entries.map(\.moduleName))
+      }
+    }
+    return imported
+  }
+
+  /// Swift modules that can be left out: empty ones (no exported symbols, so nothing to
+  /// link) that no built module imports, such as version-marker targets. A product's own
+  /// targets in `keeping` are always kept.
+  func unusedEmptyModules(
+    _ modules: [BuiltModule],
+    keeping: Set<String>,
+    index: TargetIndex,
+    architecture: String,
+    shell: Shell
+  ) throws -> Set<String> {
+    guard let imported = importedModules(of: modules, index: index, architecture: architecture)
+    else {
+      return []
+    }
+    var unused = Set<String>()
+    for module in modules where !keeping.contains(module.name) && !imported.contains(module.name) {
+      guard case .swift = module.kind else {
+        continue
+      }
+      let symbols = try shell.run(["nm", "-gU", module.object.path], stream: false)
+      if symbols.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        unused.insert(module.name)
+      }
+    }
+    return unused
   }
 
   /// `out/Products/Release-iphoneos` pairs with
