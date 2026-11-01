@@ -317,11 +317,16 @@ public struct Maker: Sendable {
     // Static modules with resources get a carrier target, so SwiftPM installs their
     // bundles. A dynamic framework is embedded with its bundle, where `Bundle.module`
     // finds it.
-    let carriersDirectory = options.outputDirectory
-      .appendingPathComponent(ResourceCarrier.folder)
-    try? fileManager.removeItem(at: carriersDirectory)
+    for folder in [
+      ResourceCarrier.folder,
+      ResourceCarrier.packagesFolder,
+      ResourceCarrier.linksFolder
+    ] {
+      try? fileManager.removeItem(at: options.outputDirectory.appendingPathComponent(folder))
+    }
     var carriers: [ResourceCarrier] = []
-    var localizations: [String] = []
+    // Dependency package name → its default localization, for its resource package.
+    var resourcePackages: [String: String?] = [:]
     // SwiftPM's resolved resources for the root package; dependencies use a scan.
     let carried = options.linkage == .static ? resourceBundles : [:]
     let described = carried.isEmpty ? [:] : (try? swiftPM.describeResources()) ?? [:]
@@ -330,13 +335,20 @@ public struct Maker: Sendable {
         continue
       }
       let isRoot = entry.package.identity == root.identity
+      // The bundle SwiftPM built is named `<package name>_<target name>`; a carrier in
+      // another package must produce the same name.
+      let suffix = "_\(entry.target.name).bundle"
+      let bundlePackage = bundle.hasSuffix(suffix)
+        ? String(bundle.dropLast(suffix.count))
+        : entry.package.manifest.name
       let carrier = try ResourceCarrier.make(
         module: module,
         target: entry.target,
         sourceDirectory: entry.package.sourceDirectory(of: entry.target),
         packageDirectory: options.outputDirectory,
         resolved: isRoot ? described[entry.target.name] : nil,
-        foreignDirectories: entry.package.foreignDirectories(within: entry.target)
+        foreignDirectories: entry.package.foreignDirectories(within: entry.target),
+        bundlePackage: bundlePackage == root.manifest.name ? nil : bundlePackage
       )
       guard let carrier else {
         let advice = "apps must copy \(bundle) from its framework into their bundle."
@@ -345,7 +357,24 @@ public struct Maker: Sendable {
         continue
       }
       carriers.append(carrier)
-      localizations += entry.package.manifest.defaultLocalization.map { [$0] } ?? []
+      if let package = carrier.bundlePackage {
+        resourcePackages[package] = entry.package.manifest.defaultLocalization
+      }
+    }
+    for (package, defaultLocalization) in resourcePackages {
+      let folder = options.outputDirectory
+        .appendingPathComponent(ResourceCarrier.packageFolder(for: package))
+      try BinaryManifest.renderResourcePackage(
+        name: package,
+        platforms: root.manifest.platforms,
+        defaultLocalization: defaultLocalization,
+        carriers: carriers.filter { $0.bundlePackage == package }
+      ).write(
+        to: folder.appendingPathComponent("Package.swift"),
+        atomically: true,
+        encoding: .utf8
+      )
+      try ResourceCarrier.makeLink(for: package, packageDirectory: options.outputDirectory)
     }
 
     let manifest = options.outputDirectory.appendingPathComponent("Package.swift")
@@ -354,7 +383,7 @@ public struct Maker: Sendable {
       platforms: root.manifest.platforms,
       products: result.products,
       artifacts: manifestArtifacts,
-      defaultLocalization: root.manifest.defaultLocalization ?? localizations.first,
+      defaultLocalization: root.manifest.defaultLocalization,
       resourceCarriers: carriers
     ).write(to: manifest, atomically: true, encoding: .utf8)
     result.manifest = manifest

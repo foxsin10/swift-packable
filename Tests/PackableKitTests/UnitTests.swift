@@ -315,6 +315,88 @@ struct ResourceCarrierTests {
     ])
   }
 
+  /// `swift package describe` lists localized files but leaves out asset catalogs, as
+  /// with CoinFind's Resources target.
+  @Test func addsAssetCatalogsSwiftPMDidNotList() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let source = work.appendingPathComponent("Sources/Resources")
+    for path in ["Languages/de.lproj/Localizable.strings",
+                 "Languages/zh-Hans.lproj/Localizable.strings",
+                 "Assets.xcassets/Contents.json", "Resource.swift"] {
+      try writeFile(source.appendingPathComponent(path))
+    }
+    let resolved: [PackageManifest.Resource] = [
+      .init(
+        path: source.appendingPathComponent("Languages/de.lproj/Localizable.strings").path,
+        rule: .process,
+        localization: "de"
+      ),
+      .init(
+        path: source.appendingPathComponent("Languages/zh-Hans.lproj/Localizable.strings").path,
+        rule: .process,
+        localization: "zh-hans"
+      )
+    ]
+    let carrier = try #require(try ResourceCarrier.make(
+      module: "Resources",
+      target: decodeTarget(resources: "[]"),
+      sourceDirectory: source,
+      packageDirectory: work.appendingPathComponent("Binary"),
+      resolved: resolved
+    ))
+    // The .lproj folders hold listed files, so they aren't added a second time.
+    #expect(carrier.resources.map(\.path) == [
+      "Languages/de.lproj/Localizable.strings",
+      "Languages/zh-Hans.lproj/Localizable.strings",
+      "Assets.xcassets"
+    ])
+    let catalog = work.appendingPathComponent("Binary/Resources/Resources/Assets.xcassets")
+    #expect(FileManager.default.fileExists(atPath: catalog.path))
+  }
+
+  /// `localization:` only takes `.default` or `.base`; SwiftPM reads a language from the
+  /// `.lproj` folder itself.
+  @Test func rendersOnlyValidLocalizations() {
+    let carrier = ResourceCarrier(module: "Kit", resources: [
+      .init(path: "de.lproj/Localizable.strings", rule: .process, localization: "de"),
+      .init(path: "zh-Hans.lproj/Localizable.strings", rule: .process, localization: "zh-hans"),
+      .init(path: "Base.lproj/Main.storyboard", rule: .process, localization: "base")
+    ])
+    let manifest = BinaryManifest.render(
+      packageName: "Kit",
+      platforms: [],
+      products: [.init(name: "Kit", modules: ["Kit"])],
+      artifacts: [("Kit", .path("XCFrameworks/Kit.xcframework"))],
+      defaultLocalization: "en",
+      resourceCarriers: [carrier]
+    )
+    let resources = #"resources: [.process("de.lproj/Localizable.strings"), "#
+      + #".process("zh-Hans.lproj/Localizable.strings"), "#
+      + #".process("Base.lproj/Main.storyboard", localization: .base)],"#
+    #expect(manifest.contains(resources))
+  }
+
+  /// RevenueCat declares `.copy("../Sources/PrivacyInfo.xcprivacy")` from its `Sources`
+  /// target folder: the path leads back inside the target.
+  @Test func normalizesDeclaredPathsThatStepOutAndBackIn() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let source = work.appendingPathComponent("Sources")
+    try writeFile(source.appendingPathComponent("PrivacyInfo.xcprivacy"))
+    let carrier = try #require(try ResourceCarrier.make(
+      module: "Kit",
+      target: decodeTarget(
+        resources: #"[{"path":"../Sources/PrivacyInfo.xcprivacy","rule":{"copy":{}}}]"#
+      ),
+      sourceDirectory: source,
+      packageDirectory: work.appendingPathComponent("Binary")
+    ))
+    #expect(carrier.resources == [.init(path: "PrivacyInfo.xcprivacy", rule: .copy)])
+    let copied = work.appendingPathComponent("Binary/Resources/Kit/PrivacyInfo.xcprivacy")
+    #expect(FileManager.default.fileExists(atPath: copied.path))
+  }
+
   @Test func noCarrierWithoutResources() throws {
     let work = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: work) }

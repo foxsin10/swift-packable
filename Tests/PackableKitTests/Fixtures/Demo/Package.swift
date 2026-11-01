@@ -8,6 +8,7 @@ let package = Package(
     .library(name: "Demo", targets: ["Demo"]),
     .library(name: "DemoExtras", targets: ["DemoExtras"])
   ],
+  dependencies: [.package(path: "LocalPackages/Phrases")],
   targets: [
     .target(name: "CDemo"),
     // Like GRDB's GRDBSQLite: a module map over a system library, with no code.
@@ -18,7 +19,7 @@ let package = Package(
     .target(name: "Demo", dependencies: ["DemoCore", "CDemo", "CZlib", "DemoMarker"]),
     .target(
       name: "DemoExtras",
-      dependencies: ["DemoCore"],
+      dependencies: ["DemoCore", .product(name: "Phrases", package: "Phrases")],
       resources: [.process("Resources")]
     )
   ]

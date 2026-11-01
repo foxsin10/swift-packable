@@ -106,9 +106,12 @@ Output directory (defaults to `<package>-binary` next to the package):
 ```
 MyPackage-binary/
 ├── Package.swift                 # Same library products as the source package, all as binaryTargets
-└── XCFrameworks/
-    ├── MyLib.xcframework         # One XCFramework per module (dependency modules included)
-    └── MyLibCore.xcframework
+├── XCFrameworks/
+│   ├── MyLib.xcframework         # One XCFramework per module (dependency modules included)
+│   └── MyLibCore.xcframework
+├── Resources/MyLib/              # Static linkage only: resources of the package's own modules
+├── Packages/Dep-resources/       # …and of a dependency's modules, in a package named after it
+└── Links/Dep/                    # Pulls that package in
 ```
 
 Clients only need to point their dependency at this directory (or at the published location) instead of the source package; their `import` statements stay the same.
@@ -141,6 +144,67 @@ When the checksum matches the existing output and all of its XCFrameworks are st
 | `--scratch-path` | SwiftPM's working folder (default `<package>/.build/packable`). When it's new and the package's `.build` already has resolved dependencies, their checkouts, repositories and artifacts are copied in as APFS clones, so they take no extra disk space. Elsewhere, or if SwiftPM rejects the copy, dependencies are resolved as usual. To reclaim an existing scratch folder's duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json` |
 | `--rebuild` | Build even when the build checksum shows the output is up to date (see [Skipping unchanged builds](#skipping-unchanged-builds)) |
 | `-v` | Show the full `swift build` output |
+
+### What `build` runs
+
+The commands behind a typical run, for an iOS app package built with
+
+```bash
+swift-packable build <package> --disable-library-evolution --arch ios-simulator=arm64
+```
+
+`<package>` is the package folder, `<scratch>` the scratch folder (default `<package>/.build/packable`), `<output>` the output folder (default `<package>-binary`) and `<Product>` the library product.
+
+1. Resolve the graph and read each manifest:
+
+   ```bash
+   swift package --package-path <package> --scratch-path <scratch> show-dependencies --format json
+   swift package --package-path <dependency> --scratch-path <scratch>/manifests/<identity> dump-package
+   ```
+
+2. Compile once per product, platform slice and architecture. Before each build the same command with `--show-bin-path` finds the products folder, which is then emptied:
+
+   ```bash
+   # Device slice; the simulator uses --triple arm64-apple-ios-simulator and the iphonesimulator SDK
+   swift build --package-path <package> --scratch-path <scratch> \
+     --configuration release --build-system swiftbuild \
+     --triple arm64-apple-ios \
+     --sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+     --product <Product>
+   ```
+
+   With library evolution (the default) it also passes `--enable-parseable-module-interfaces -Xswiftc -enable-library-evolution`, plus `-Xswiftc -no-verify-emitted-module-interface` with `--skip-interface-verification`.
+
+3. Wrap each module in a framework:
+
+   ```bash
+   nm -gU <Module>.o        # empty modules that nothing imports are left out
+   # A .systemLibrary module gets an empty object, so its XCFramework has a binary
+   xcrun --sdk iphoneos clang -target arm64-apple-ios<minos> -x c -c /dev/null -o <Module>.o
+   libtool -static -D -no_warning_for_no_symbols -o <Module>.framework/<Module> <Module>.o
+   ```
+
+   Headers, the module map and the `.swiftmodule` are copied in. With several architectures, `lipo -create` merges them first; with `--linkage dynamic`, `swiftc`/`clang` link a dylib and `dsymutil` writes its dSYM instead of `libtool`.
+
+4. Combine the platforms into an XCFramework:
+
+   ```bash
+   xcodebuild -create-xcframework \
+     -framework <scratch>/frameworks/ios/<Module>.framework \
+     -framework <scratch>/frameworks/ios-simulator/<Module>.framework \
+     -allow-internal-distribution \
+     -output <output>/XCFrameworks/<Module>.xcframework
+   ```
+
+   `-allow-internal-distribution` is only passed with `--disable-library-evolution`, whose frameworks have no `.swiftinterface` files.
+
+5. Read the package's own resources, then write `Package.swift`, the resource carriers (`Resources/`, `Packages/`, `Links/`) and `packable-metadata.json`:
+
+   ```bash
+   swift package --package-path <package> --scratch-path <scratch> describe --type json
+   ```
+
+`-v` streams the `swift build` output; the command lines themselves are only printed when one fails.
 
 ## Switching dependencies between source and binary
 
@@ -257,10 +321,10 @@ Static frameworks remain the default, since each dynamic framework adds a little
 
 - **One XCFramework per module.** Every module a product depends on (C modules and third-party dependency modules included) gets its own XCFramework, and the generated `Package.swift` groups them into a product with the same name. That keeps `import` relationships between modules working in binary form. Link all of a product's XCFrameworks into an app, not only the top-level one. Empty modules that nothing imports, such as the `Sharing1`/`Sharing2` version markers in swift-sharing, are left out: they have no code, and SwiftPM's dependency scans show no module needs them. A product's own targets are always kept, and if a scan is missing nothing is left out. Code that checks `#if canImport(Sharing2)` against the binaries sees `false`.
 - **System library targets.** A `.systemLibrary` target that a packaged module depends on (for example `GRDBSQLite` in GRDB) gets an XCFramework with its module map, headers and an empty binary, because modules whose interface imports it can't compile without it. Its `link` directive still links the system library.
-- **Resources work through the generated package.** For a static module with resources, the generated `Package.swift` renames its binary target to `<Module>Binary` and adds a small target named `<Module>` that carries the original resource files (under `Resources/<Module>/`). SwiftPM and Xcode process them for the client's platform and install `<Package>_<Module>.bundle` where the compiled `Bundle.module` looks for it, so nothing has to be copied by hand. Declared `.process`/`.copy` resources are carried, plus the types SwiftPM picks up implicitly (asset catalogs, `.xib`, `.storyboard`, `.lproj`, `.xcstrings`, Core Data and Metal files). The bundle is also inside each static framework, for apps that use an XCFramework directly without the package; those apps must copy it into their bundle themselves.
+- **Resources work through the generated package.** For a static module with resources, the generated `Package.swift` renames its binary target to `<Module>Binary` and adds a small target named `<Module>` that carries the original resource files (under `Resources/<Module>/`). SwiftPM and Xcode process them for the client's platform and install `<Package>_<Module>.bundle` where the compiled `Bundle.module` looks for it, so nothing has to be copied by hand. The bundle name comes from the package the module was built in, so a dependency's carriers (for example RevenueCatUI's) sit in a small local package with that dependency's name, `Packages/<Package>-resources/`, which the generated package pulls in through a link target `<Package>Resources`. Declared `.process`/`.copy` resources are carried, plus the types SwiftPM picks up implicitly (asset catalogs, `.xib`, `.storyboard`, `.lproj`, `.xcstrings`, Core Data and Metal files). The bundle is also inside each static framework, for apps that use an XCFramework directly without the package; those apps must copy it into their bundle themselves.
 - **Interface verification failures.** Some libraries (for example swift-collections 1.7.x) emit `.swiftinterface` files that don't verify with the current compiler. Pass `--skip-interface-verification` in that case; the tool then also keeps the compiled `.swiftmodule` files, so clients using the same compiler version can still import the modules.
 - **Packages that don't compile with library evolution.** Some code builds normally but fails with `-enable-library-evolution`. Pass `--disable-library-evolution` to build without it. The modules are then not resilient, so no `.swiftinterface` files are emitted (the compiler only supports them with library evolution): each framework carries the compiled `.swiftmodule` files, the XCFrameworks are created with `-allow-internal-distribution`, and the tool warns that clients must use the same Swift compiler as the build. On another compiler they fail to import. `--skip-interface-verification` has no effect in this mode.
-- **Any target layout.** Targets with a custom `path:` (including `path: "."` narrowed with `sources:`/`exclude:`) and the `Source/`, `src/`, `srcs/` default folders work. Resources come from SwiftPM's own resolved list (`swift package describe`), so `exclude:` and implicit resource types match what SwiftPM builds, and only header files are copied into a framework's `Headers/`, even when public headers sit next to sources (`publicHeadersPath: "."`).
+- **Any target layout.** Targets with a custom `path:` (including `path: "."` narrowed with `sources:`/`exclude:`) and the `Source/`, `src/`, `srcs/` default folders work. Resources come from SwiftPM's own resolved list (`swift package describe`), so `exclude:` and implicit resource types match what SwiftPM builds; asset catalogs, which that list leaves out, are added from a scan of the target folder. Localized files keep their `.lproj` folders, where SwiftPM reads the language from; and only header files are copied into a framework's `Headers/`, even when public headers sit next to sources (`publicHeadersPath: "."`).
 - **Macro and binaryTarget dependencies** aren't packaged yet.
 - Apple platforms only.
 

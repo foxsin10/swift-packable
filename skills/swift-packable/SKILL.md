@@ -53,9 +53,12 @@ Output:
 ```
 MyPackage-binary/
 ├── Package.swift            # same library product names, all binaryTargets
-└── XCFrameworks/
-    ├── MyLib.xcframework    # one XCFramework per module: dependency, C and system library modules included
-    └── MyLibCore.xcframework
+├── XCFrameworks/
+│   ├── MyLib.xcframework    # one XCFramework per module: dependency, C and system library modules included
+│   └── MyLibCore.xcframework
+├── Resources/<Module>/      # static only: resource carriers for the package's own modules
+├── Packages/<Dep>-resources/ # static only: a dependency's carriers, in a package named after it
+└── Links/<Dep>/             # link target that pulls that package in
 ```
 
 Clients point their dependency at that folder (or the published URL) instead of the source; `import`s stay the same. Every generated binary package also has `packable-metadata.json` (source tag/commit, the modules it bundles, and the build checksum).
@@ -66,7 +69,7 @@ What is handled for you:
 
 - **Module closure.** Each product's XCFrameworks are the modules it actually links, remote dependencies included. Link all of them into an app, not only the top-level one. Empty modules nothing imports (e.g. swift-sharing's `Sharing1`/`Sharing2` version markers) are left out and logged as `skipping <Module>`; `#if canImport(...)` on them is then false.
 - **System library targets** (`.systemLibrary`, e.g. GRDB's `GRDBSQLite`) that a packaged module depends on get an XCFramework with the module map, headers and an empty binary, so interfaces that import them compile.
-- **Resources.** For a static module with resources, the generated manifest renames the binary target to `<Module>Binary` and adds a carrier target `<Module>` holding the resource files, so `Bundle.module` works. Dynamic frameworks keep the bundle inside the framework and need no carrier.
+- **Resources.** For a static module with resources, the generated manifest renames the binary target to `<Module>Binary` and adds a carrier target `<Module>` holding the resource files (localized `.lproj` files and asset catalogs included), so `Bundle.module` works. A dependency's carriers go in `Packages/<Dep>-resources/`, a local package with the dependency's name, so the bundle keeps the `<Dep>_<Target>` name its code looks for. Dynamic frameworks keep the bundle inside the framework and need no carrier.
 - **Any target layout.** Custom `path:`, `sources:`/`exclude:`, `Source/`, `src/`, `srcs/`, `publicHeadersPath: "."`.
 - **Dynamic frameworks** link their dependency frameworks via `@rpath`, carry dSYMs, and set `MinimumOSVersion` outside macOS.
 

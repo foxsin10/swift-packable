@@ -29,12 +29,12 @@ import Testing
 
     let result = try Maker(options: options, log: { _ in }).run()
 
-    #expect(result.artifacts.keys.sorted() == ["CDemo", "CZlib", "Demo", "DemoCore", "DemoExtras"])
+    #expect(result.artifacts.keys.sorted() == ["CDemo", "CZlib", "Demo", "DemoCore", "DemoExtras", "Phrases"])
     #expect(result.products == [
       .init(name: "Demo", modules: ["Demo", "CDemo", "CZlib", "DemoCore"]),
-      .init(name: "DemoExtras", modules: ["DemoExtras", "DemoCore"])
+      .init(name: "DemoExtras", modules: ["DemoExtras", "DemoCore", "Phrases"])
     ])
-    #expect(result.checksums.count == 5)
+    #expect(result.checksums.count == 6)
     #expect(result.warnings.isEmpty)
 
     let binaryPackage = work.appendingPathComponent("DemoBinary")
@@ -48,13 +48,22 @@ import Testing
     case .static:
       // DemoExtras has resources: its binary target is renamed, and a carrier target with
       // the original resource files takes the module's name.
-      #expect(generated
-        .contains(#"targets: ["DemoExtrasBinary", "DemoExtras", "DemoCore"]"#))
+      // Phrases comes from another package, so its carrier is in a local package with
+      // that package's name, which its compiled Bundle.module expects in the bundle name.
+      #expect(generated.contains(
+        #"targets: ["DemoExtrasBinary", "DemoExtras", "DemoCore", "PhrasesBinary", "PhrasesResources"]"#
+      ))
+      #expect(generated.contains(#".package(path: "Packages/Phrases-resources")"#))
+      let phrasesPackage = try String(
+        contentsOf: binaryPackage.appendingPathComponent("Packages/Phrases-resources/Package.swift"),
+        encoding: .utf8
+      )
+      #expect(phrasesPackage.contains(#"name: "Phrases","#))
       #expect(generated.contains(#"resources: [.process("Resources/message.txt")]"#))
       #expect(FileManager.default.fileExists(atPath: message.path))
     case .dynamic:
       // The bundle ships inside the embedded framework, so there's no carrier.
-      #expect(generated.contains(#"targets: ["DemoExtras", "DemoCore"]"#))
+      #expect(generated.contains(#"targets: ["DemoExtras", "DemoCore", "Phrases"]"#))
       #expect(!FileManager.default.fileExists(atPath: message.path))
     }
 
@@ -134,6 +143,7 @@ import Testing
       import CDemo
       import Demo
       import DemoExtras
+      import Phrases
       // Demo.checksum calls zlib through the CZlib system library module.
       print(
         Demo.answer(), Greeter().greeting(), Extras.doubled(), cdemo_add(2, 3),
@@ -141,6 +151,8 @@ import Testing
       )
       // Read from DemoExtras' resource bundle, which SwiftPM installs from the carrier target.
       print(Extras.message() ?? "missing")
+      // Read from the Phrases dependency's own resource bundle.
+      print(Phrases.farewell() ?? "missing")
       """.write(
       to: client.appendingPathComponent("Sources/Client/main.swift"),
       atomically: true,
@@ -158,7 +170,7 @@ import Testing
       in: client
     )
     #expect(output.trimmingCharacters(in: .whitespacesAndNewlines)
-      .hasSuffix("42 answer=42 82 5 907060870\nhello from resources"))
+      .hasSuffix("42 answer=42 82 5 907060870\nhello from resources\n\ngoodbye from a dependency"))
 
     let simulatorSDK = try shell.run([
       "xcrun",
