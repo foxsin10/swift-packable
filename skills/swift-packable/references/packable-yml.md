@@ -21,7 +21,7 @@ dependencies:
     linkage: dynamic
     skip-interface-verification: true
     disable-library-evolution: false
-    debug-info: false
+    debug-info: false                      # or debug-objects: true, not both
 ```
 
 Write each dependency as a block mapping (`Name:` on its own line, keys indented below). `use` edits the `mode:` line as text, keeping comments and layout, and adds `mode:` when it's missing; it can't edit a dependency written in flow style (`Name: { … }`) and fails with ``Couldn't find `Name:` (in block style) under `dependencies:` ``. Locations may be flow style. Names may be quoted (`"My-Kit":`).
@@ -46,6 +46,7 @@ Write each dependency as a block mapping (`Name:` on its own line, keys indented
 | `skip-interface-verification` | no | `false` | On-demand builds only. |
 | `disable-library-evolution` | no | `false` | On-demand builds only. Builds without `-enable-library-evolution` and without `.swiftinterface`s; clients must use the same compiler. |
 | `debug-info` | no | `false` | On-demand builds only, like `--debug-info`: static frameworks keep DWARF so lldb/xcsrclink can map sources. Static only; cached separately (`-debug-info` suffix). |
+| `debug-objects` | no | `false` | On-demand builds only, like `--debug-objects`: static frameworks stay lean and their debug objects go to the cache entry's `debug-objects/` folder. Static only; cached separately (`-debug-objects` suffix). Setting it with `debug-info` fails: `<file>: <name> sets both debug-info and debug-objects; choose one.` |
 
 ## Locations
 
@@ -119,8 +120,9 @@ targets: [.target(name: "App", dependencies: [packable("ShowcaseKit", from: "Sho
 ## Cache layout
 
 ```
-<cache>/<name>/local[-dynamic|-debug-info]/<name>-binary/          # local source; rebuilt when its build checksum changes
-<cache>/<name>/<tag>[-dynamic|-debug-info]/<name>-binary/          # remote source at a tag
-<cache>/<name>/rev-<12 chars>[-dynamic|-debug-info]/<name>-binary/ # remote source at a branch or revision
+<cache>/<name>/local[-dynamic|-debug-info|-debug-objects]/<name>-binary/          # local source; rebuilt when its build checksum changes
+<cache>/<name>/<tag>[-dynamic|-debug-info|-debug-objects]/<name>-binary/          # remote source at a tag
+<cache>/<name>/rev-<12 chars>[-dynamic|-debug-info|-debug-objects]/<name>-binary/ # remote source at a branch or revision
+<cache>/<name>/<entry>-debug-objects/debug-objects/                     # debug objects, next to that entry's binary
 <cache>/<name>/resolver/                               # throwaway package that resolves the remote source
 ```

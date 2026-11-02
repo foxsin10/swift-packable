@@ -242,15 +242,27 @@ public struct DependencySwitcher: Sendable {
     if dependency.debugInfo, dependency.linkage == .static {
       variant += "-debug-info"
     }
+    if dependency.debugObjects, dependency.linkage == .static {
+      variant += "-debug-objects"
+    }
+    // Next to the binary package, so the frameworks' debug maps stay valid as long as
+    // the cache entry.
+    func debugObjects(in entry: URL) -> URL? {
+      dependency.debugObjects && dependency.linkage == .static
+        ? entry.appendingPathComponent("debug-objects")
+        : nil
+    }
 
     if let path = dependency.source.path {
       let source = absoluteURL(path)
-      let output = root.appendingPathComponent("local\(variant)/\(name)-binary")
+      let entry = root.appendingPathComponent("local\(variant)")
+      let output = entry.appendingPathComponent("\(name)-binary")
       log("▸ \(name): binary from \(source.path)")
       try package(
         source: source,
         into: output,
-        scratch: root.appendingPathComponent("local\(variant)/scratch"),
+        scratch: entry.appendingPathComponent("scratch"),
+        debugObjects: debugObjects(in: entry),
         dependency: dependency
       )
       return output
@@ -261,14 +273,23 @@ public struct DependencySwitcher: Sendable {
       location: dependency.source,
       root: root
     )
-    let output = root.appendingPathComponent("\(key)\(variant)/\(name)-binary")
-    if !options.rebuild, BinaryMetadata.read(from: output) != nil {
+    let entry = root.appendingPathComponent("\(key)\(variant)")
+    let output = entry.appendingPathComponent("\(name)-binary")
+    let debugFolder = debugObjects(in: entry)
+    if !options.rebuild, BinaryMetadata.read(from: output) != nil,
+       debugFolder.map({ FileManager.default.fileExists(atPath: $0.path) }) ?? true {
       log("▸ \(name) \(key): using cached binary (\(output.path))")
       return output
     }
     log("▸ \(name) \(key): building binary")
-    let scratch = root.appendingPathComponent("\(key)\(variant)/scratch")
-    try package(source: checkout, into: output, scratch: scratch, dependency: dependency)
+    let scratch = entry.appendingPathComponent("scratch")
+    try package(
+      source: checkout,
+      into: output,
+      scratch: scratch,
+      debugObjects: debugFolder,
+      dependency: dependency
+    )
     try? FileManager.default.removeItem(at: scratch)
     return output
   }
@@ -327,6 +348,7 @@ public struct DependencySwitcher: Sendable {
     source: URL,
     into output: URL,
     scratch: URL,
+    debugObjects: URL?,
     dependency: PackableConfig.Dependency
   ) throws {
     var options = MakerOptions(packageDirectory: source, outputDirectory: output)
@@ -341,6 +363,7 @@ public struct DependencySwitcher: Sendable {
     options.verifyModuleInterfaces = !dependency.skipInterfaceVerification
     options.libraryEvolution = !dependency.disableLibraryEvolution
     options.debugInfo = dependency.debugInfo
+    options.debugObjectsDirectory = debugObjects
     options.linkage = dependency.linkage
     options.rebuild = self.options.rebuild
     options.verbose = self.options.verbose

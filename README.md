@@ -120,11 +120,11 @@ Clients only need to point their dependency at this directory (or at the publish
 
 Every build records a **build checksum** in the output's `packable-metadata.json`. It is a SHA-256 of:
 
-- the file contents of the package and of every package in its dependency graph (local path dependencies and resolved remote checkouts), leaving out `.build`, `.git`, `.swiftpm` and the output and scratch folders
-- the options that shape the output (products, platforms, architectures, deployment targets, configuration, linkage, interface and `.swiftmodule` settings, debug info, pass-through flags, zip and base URL, bundle ID prefix, framework version)
+- the file contents of the package and of every package in its dependency graph (local path dependencies and resolved remote checkouts), leaving out `.build`, `.git`, `.swiftpm` and the output, scratch and debug objects folders
+- the options that shape the output (products, platforms, architectures, deployment targets, configuration, linkage, interface and `.swiftmodule` settings, debug info and the debug objects folder's path, pass-through flags, zip and base URL, bundle ID prefix, framework version)
 - the toolchain (`swift --version`, `xcodebuild -version`) and the `swift-packable` binary itself
 
-When the checksum matches the existing output and all of its XCFrameworks are still there, nothing is built: the command prints `✔ Up to date` and leaves the output as it is. Only the package graph is resolved and the files are read. Pass `--rebuild` to build anyway. Modification dates don't count, so a fresh clone or `touch` doesn't trigger a rebuild.
+When the checksum matches the existing output and all of its XCFrameworks (and, with `--debug-objects`, its debug objects) are still there, nothing is built: the command prints `✔ Up to date` and leaves the output as it is. Only the package graph is resolved and the files are read. Pass `--rebuild` to build anyway. Modification dates don't count, so a fresh clone or `touch` doesn't trigger a rebuild.
 
 ### Common options
 
@@ -141,6 +141,7 @@ When the checksum matches the existing output and all of its XCFrameworks are st
 | `--include-binary-swiftmodules` | Keep the compiled `.swiftmodule` files in the XCFrameworks |
 | `--disable-library-evolution` | Build without `-enable-library-evolution`, for packages that don't compile with it (see below) |
 | `--debug-info` | Keep DWARF debug info in static frameworks, so lldb and tools like xcsrclink can map their sources (see [Debug info](#debug-info-in-static-frameworks)) |
+| `--debug-objects <dir>` | Keep static frameworks lean and put their debug info in `<dir>` instead; can't be combined with `--debug-info` (see [Debug info](#debug-info-in-static-frameworks)) |
 | `-Xswiftc` / `-Xcc` / `-Xlinker` | Pass flags through to `swift build` (`-Xlinker` also reaches the dylib link with `--linkage dynamic`) |
 | `--scratch-path` | SwiftPM's working folder (default `<package>/.build/packable`). When it's new and the package's `.build` already has resolved dependencies, their checkouts, repositories and artifacts are copied in as APFS clones, so they take no extra disk space. Elsewhere, or if SwiftPM rejects the copy, dependencies are resolved as usual. To reclaim an existing scratch folder's duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json` |
 | `--rebuild` | Build even when the build checksum shows the output is up to date (see [Skipping unchanged builds](#skipping-unchanged-builds)) |
@@ -187,6 +188,14 @@ swift-packable build <package> --disable-library-evolution --arch ios-simulator=
 
    Headers, the module map and the `.swiftmodule` are copied in. With several architectures, `lipo -create` merges them first; with `--linkage dynamic`, `swiftc`/`clang` link a dylib and `dsymutil` writes its dSYM instead of `libtool`.
 
+   `--debug-info` archives the objects listed in the target's `LinkFileList` instead of `<Module>.o`. `--debug-objects <dir>` copies them (and the `.swiftmodule`) to `<dir>/<Module>/<platform>/<arch>/` and prelinks them again from there:
+
+   ```bash
+   libtool -static -D -no_warning_for_no_symbols -o <Module>.a -filelist <Target>.LinkFileList   # --debug-info
+   xcrun ld -r -arch arm64 -reproducible -filelist <dir>/…/<Target>.LinkFileList \
+     -add_ast_path <dir>/…/<Module>.swiftmodule -o <Module>.o                              # --debug-objects
+   ```
+
 4. Combine the platforms into an XCFramework:
 
    ```bash
@@ -232,6 +241,7 @@ dependencies:
     skip-interface-verification: true     # default false
     disable-library-evolution: false      # default false
     debug-info: false                     # default false; static frameworks only
+    debug-objects: false                  # default false; static only, not with debug-info
 ```
 
 ### `packable.yml` reference
@@ -258,8 +268,9 @@ Dependency entry:
 | `skip-interface-verification` | no | `false` | Skip `.swiftinterface` verification when building on demand. |
 | `disable-library-evolution` | no | `false` | Build without library evolution when building on demand. |
 | `debug-info` | no | `false` | Keep DWARF debug info in static frameworks when building on demand, like `--debug-info`. Cached separately. |
+| `debug-objects` | no | `false` | Put the static frameworks' debug info in the cache entry's `debug-objects/` folder when building on demand, like `--debug-objects`. Cached separately; can't be combined with `debug-info`. |
 
-`products`, `platforms`, `linkage`, `skip-interface-verification`, `disable-library-evolution` and `debug-info` only apply to binaries built on demand. A declared `binary:` is used as it is.
+`products`, `platforms`, `linkage`, `skip-interface-verification`, `disable-library-evolution`, `debug-info` and `debug-objects` only apply to binaries built on demand. A declared `binary:` is used as it is.
 
 #### Locations
 
@@ -344,11 +355,12 @@ let package = Package(
 - **Declared:** `binary:` points at a binary package, either one this tool generated or a released one at a URL.
 - **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in the package's `.build/packable-cache` (override with `cache:` in `packable.yml`). Local sources are rebuilt only when their [build checksum](#skipping-unchanged-builds) changes: their files, their dependencies' files, the build settings or the toolchain. Remote sources are resolved by SwiftPM and cached per version. `.build` isn't committed, so run `generate` after cloning, and after `swift package clean` or `swift package reset` (both delete it), to fill the cache again.
 
-The cache holds one folder per entry. Dynamic builds get a `-dynamic` suffix and static builds with `debug-info: true` a `-debug-info` suffix, so switching those back and forth doesn't rebuild:
+The cache holds one folder per entry. Dynamic builds get a `-dynamic` suffix, and static builds with `debug-info: true` or `debug-objects: true` a `-debug-info` or `-debug-objects` suffix, so switching those back and forth doesn't rebuild:
 
 ```
 .build/packable-cache/
 ├── ShowcaseKit/local/ShowcaseKit-binary/            # local source
+├── ShowcaseKit/local-debug-objects/debug-objects/   # debug-objects: true keeps them next to the binary
 ├── Logging/1.6.1-dynamic/Logging-binary/            # remote source, by resolved tag
 ├── Logging/resolver/                                # throwaway package that resolves the remote source
 └── Kit/rev-4f2c1e0a1b2c/Kit-binary/                 # branch or revision: rev-<first 12 of the commit>
@@ -383,7 +395,17 @@ Static frameworks remain the default, since each dynamic framework adds a little
 - **System library targets.** A `.systemLibrary` target that a packaged module depends on (for example `GRDBSQLite` in GRDB) gets an XCFramework with its module map, headers and an empty binary, because modules whose interface imports it can't compile without it. Its `link` directive still links the system library.
 - **Resources work through the generated package.** For a static module with resources, the generated `Package.swift` renames its binary target to `<Module>Binary` and adds a small target named `<Module>` that carries the original resource files (under `Resources/<Module>/`). SwiftPM and Xcode process them for the client's platform and install `<Package>_<Module>.bundle` where the compiled `Bundle.module` looks for it, so nothing has to be copied by hand. The bundle name comes from the package the module was built in, so a dependency's carriers (for example RevenueCatUI's) sit in a small local package with that dependency's name, `Packages/<Package>-resources/`, which the generated package pulls in through a link target `<Package>Resources`. Declared `.process`/`.copy` resources are carried, plus the types SwiftPM picks up implicitly (asset catalogs, `.xib`, `.storyboard`, `.lproj`, `.xcstrings`, Core Data and Metal files). The bundle is also inside each static framework, for apps that use an XCFramework directly without the package; those apps must copy it into their bundle themselves.
 - **Interface verification failures.** Some libraries (for example swift-collections 1.7.x) emit `.swiftinterface` files that don't verify with the current compiler. Pass `--skip-interface-verification` in that case; the tool then also keeps the compiled `.swiftmodule` files, so clients using the same compiler version can still import the modules.
-- <a id="debug-info-in-static-frameworks"></a>**Debug info in static frameworks.** By default a static framework's binary is SwiftPM's prelinked `<Module>.o`. `ld -r` doesn't copy DWARF into it, only a debug map pointing at the object files in the scratch folder, so once the framework is used elsewhere (or the scratch folder is gone) lldb can't show its sources, and xcsrclink reports `no debug info with source paths`. With `--debug-info` the binary is instead an archive of the target's own object files, which keep their DWARF and the absolute source paths of the build machine. It's larger (about 2.5× for a typical module), and the app's linker loads only the members it references, as with any static library Xcode builds: a file that nothing references by symbol, such as one that only adds a protocol conformance used through `as?`, is left out unless the app links with `-ObjC` or `-all_load`. Dynamic frameworks don't need the flag: their dSYMs are made while the object files still exist.
+- <a id="debug-info-in-static-frameworks"></a>**Debug info in static frameworks.** By default a static framework's binary is SwiftPM's prelinked `<Module>.o`. `ld -r` doesn't copy DWARF into it, only a debug map pointing at the object files in the scratch folder, so once the framework is used elsewhere (or the scratch folder is gone) lldb can't show its sources, and xcsrclink reports `no debug info with source paths`. There are two ways to keep it:
+
+  | | `--debug-info` | `--debug-objects <dir>` |
+  |---|---|---|
+  | Debug info lives in | the framework: its binary is an archive of the target's object files | `<dir>/<Module>/<platform>/<arch>/`: those objects, which the framework's debug map points at |
+  | Framework | about 2.5× larger | same size as the default |
+  | Linking | the app loads only the members it references, as with any static library Xcode builds: a file nothing references by symbol, such as one that only adds a protocol conformance used through `as?`, is left out unless the app links with `-ObjC` or `-all_load` | same as the default |
+  | Debugging works | wherever the framework goes | while `<dir>` stays at that path, on that machine |
+  | xcsrclink | point it at the framework | point it at `<dir>` |
+
+  Either way the debug info holds the build machine's absolute source paths, which xcsrclink maps to a local checkout. With `--debug-objects`, `packable-metadata.json` records the folder and its modules under `debugObjects`, and an app's dSYM includes the library's DWARF only if the folder exists when the app is built. Dynamic frameworks need neither: their dSYMs are made while the object files still exist. How the debug map reaches the app is in [docs/debug-info.md](docs/debug-info.md).
 - **Packages that don't compile with library evolution.** Some code builds normally but fails with `-enable-library-evolution`. Pass `--disable-library-evolution` to build without it. The modules are then not resilient, so no `.swiftinterface` files are emitted (the compiler only supports them with library evolution): each framework carries the compiled `.swiftmodule` files, the XCFrameworks are created with `-allow-internal-distribution`, and the tool warns that clients must use the same Swift compiler as the build. On another compiler they fail to import. `--skip-interface-verification` has no effect in this mode.
 - **Any target layout.** Targets with a custom `path:` (including `path: "."` narrowed with `sources:`/`exclude:`) and the `Source/`, `src/`, `srcs/` default folders work. Resources come from SwiftPM's own resolved list (`swift package describe`), so `exclude:` and implicit resource types match what SwiftPM builds; asset catalogs, which that list leaves out, are added from a scan of the target folder. Localized files keep their `.lproj` folders, where SwiftPM reads the language from; and only header files are copied into a framework's `Headers/`, even when public headers sit next to sources (`publicHeadersPath: "."`).
 - **Macro and binaryTarget dependencies** aren't packaged yet.

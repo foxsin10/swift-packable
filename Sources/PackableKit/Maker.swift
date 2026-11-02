@@ -35,6 +35,12 @@ public struct MakerOptions: Sendable {
   /// the build folder. The app's linker then loads only the members it references.
   /// Dynamic frameworks carry debug info in their dSYMs either way.
   public var debugInfo: Bool = false
+  /// Static frameworks stay as lean as the default, but their object files, which hold
+  /// the DWARF debug info, are copied to `<directory>/<Module>/<platform>/<arch>/` and
+  /// prelinked from there, so the frameworks' debug maps point at the copies. Apps find
+  /// the debug info while the folder stays at this path. Can't be combined with
+  /// `debugInfo`.
+  public var debugObjectsDirectory: URL?
   public var extraBuildArguments: [String] = []
   public var zip: Bool = false
   /// When set together with `zip`, the generated manifest points at
@@ -86,6 +92,19 @@ public struct Maker: Sendable {
   public func run() throws -> MakerResult {
     let fileManager = FileManager.default
     var result = MakerResult()
+    if options.debugInfo, options.debugObjectsDirectory != nil {
+      throw MakerError(
+        "Choose one place for debug info: --debug-info keeps it in the frameworks, --debug-objects in a separate folder."
+      )
+    }
+    let debugObjects = options.linkage == .static
+      ? options.debugObjectsDirectory.map { DebugObjects(shell: shell, directory: $0) }
+      : nil
+    if options.debugObjectsDirectory != nil, debugObjects == nil {
+      result.warnings.append(
+        "--debug-objects only applies to static frameworks; dynamic frameworks carry dSYMs."
+      )
+    }
 
     log("▸ Resolving package graph")
     let packages = try loadPackages()
@@ -122,6 +141,8 @@ public struct Maker: Sendable {
     var skippedModules = Set<String>()
     let merger = ArchitectureMerger(shell: shell)
     let scratchRoot = canonicalPath(scratchDirectory) + "/"
+    // Modules whose folder in the debug objects directory was cleared this run.
+    var debugFolders = Set<String>()
 
     for platform in platforms {
       let architectures = options.architectures[platform] ?? platform.defaultArchitectures
@@ -201,10 +222,11 @@ public struct Maker: Sendable {
             }
             let directory = platformStaging
               .appendingPathComponent("arch/\(architecture)/\(module.name)")
-            var linkFileList: URL?
-            if options.debugInfo, options.linkage == .static,
+            var source = module
+            var archivedObjects: URL?
+            if options.debugInfo || debugObjects != nil, options.linkage == .static,
                !systemLibraries.contains(where: { $0.name == module.name }) {
-              linkFileList = productsDirectory.linkFileList(
+              let linkFileList = productsDirectory.linkFileList(
                 of: module,
                 index: index,
                 architecture: architecture
@@ -214,11 +236,25 @@ public struct Maker: Sendable {
               if linkFileList == nil, !result.warnings.contains(warning) {
                 result.warnings.append(warning)
               }
+              if let linkFileList, let debugObjects {
+                if debugFolders.insert(module.name).inserted {
+                  try? fileManager.removeItem(at: debugObjects.folder(of: module.name))
+                }
+                source = try debugObjects.relocate(
+                  module,
+                  linkFileList: linkFileList,
+                  platform: platform,
+                  architecture: architecture,
+                  staging: platformStaging.appendingPathComponent("relocated/\(architecture)")
+                )
+              } else if options.debugInfo {
+                archivedObjects = linkFileList
+              }
             }
             snapshots[module.name, default: [:]][architecture] = try merger.snapshot(
-              module,
+              source,
               into: directory,
-              linkFileList: linkFileList
+              linkFileList: archivedObjects
             )
           }
         }
@@ -416,7 +452,13 @@ public struct Maker: Sendable {
       buildChecksum: checksum,
       linkage: options.linkage,
       modules: frameworks.keys.sorted(),
-      products: result.products.reduce(into: [:]) { $0[$1.name] = $1.modules }
+      products: result.products.reduce(into: [:]) { $0[$1.name] = $1.modules },
+      debugObjects: debugObjects.map {
+        BinaryMetadata.DebugObjects(
+          path: $0.directory.standardizedFileURL.path,
+          modules: debugFolders.sorted()
+        )
+      }
     ).write(to: options.outputDirectory)
     return result
   }
@@ -515,7 +557,10 @@ public struct Maker: Sendable {
       "verify-interfaces:\(options.verifyModuleInterfaces)",
       "binary-swiftmodules:\(options.includeBinarySwiftModules)",
       "library-evolution:\(options.libraryEvolution)",
-    ] + (options.debugInfo ? ["debug-info:true"] : []) + [
+    ] + (options.debugInfo ? ["debug-info:true"] : [])
+      // The frameworks record this path, so moving it is a different build.
+      + (options.debugObjectsDirectory.map { ["debug-objects:" + canonicalPath($0)] } ?? [])
+      + [
       "build-arguments:" + options.extraBuildArguments.joined(separator: "\u{1F}"),
       "zip:\(options.zip)",
       "base-url:" + (options.baseURL ?? ""),
@@ -526,6 +571,7 @@ public struct Maker: Sendable {
       packages: packages.map { ($0.identity, $0.directory) },
       settings: settings,
       excluding: [options.outputDirectory, scratchDirectory]
+        + (options.debugObjectsDirectory.map { [$0] } ?? [])
     )
   }
 
@@ -539,6 +585,15 @@ public struct Maker: Sendable {
           fileManager.fileExists(atPath: output.appendingPathComponent("Package.swift").path)
     else {
       return nil
+    }
+    // The frameworks are only debuggable while their debug objects are there.
+    if let directory = options.debugObjectsDirectory {
+      let debugObjects = DebugObjects(shell: shell, directory: directory)
+      for module in metadata.debugObjects?.modules ?? [] {
+        guard fileManager.fileExists(atPath: debugObjects.folder(of: module).path) else {
+          return nil
+        }
+      }
     }
     let suffix = options.zip ? ".xcframework.zip" : ".xcframework"
     var result = MakerResult()

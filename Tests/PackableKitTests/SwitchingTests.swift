@@ -15,8 +15,10 @@ struct PackableConfigTests {
           skip-interface-verification: true
           disable-library-evolution: true
           linkage: dynamic
+          debug-info: true
         Remote:
           source: { url: https://github.com/org/Remote.git, up-to-next-minor: 2.1.0 }
+          debug-objects: true
       """)
     #expect(config.names == ["Kit", "Remote"])
     let kit = try #require(config.dependencies["Kit"])
@@ -26,10 +28,12 @@ struct PackableConfigTests {
     #expect(kit.skipInterfaceVerification)
     #expect(kit.disableLibraryEvolution)
     #expect(kit.linkage == .dynamic)
+    #expect(kit.debugInfo && !kit.debugObjects)
     let remote = try #require(config.dependencies["Remote"])
     #expect(remote.mode == .source)
     #expect(remote.linkage == .static)
     #expect(!remote.disableLibraryEvolution)
+    #expect(remote.debugObjects && !remote.debugInfo)
     #expect(remote.source.packageName == "Remote")
     #expect(remote.source.requirementArguments == ".upToNextMinor(from: \"2.1.0\")")
   }
@@ -43,6 +47,18 @@ struct PackableConfigTests {
   func rejectsInvalidLocations(location: String) {
     #expect(throws: MakerError.self) {
       try PackableConfig.parse("dependencies:\n  Kit:\n    \(location)\n")
+    }
+  }
+
+  @Test func rejectsBothDebugInfoModes() {
+    #expect(throws: MakerError.self) {
+      try PackableConfig.parse("""
+        dependencies:
+          Kit:
+            source: { path: ../Kit }
+            debug-info: true
+            debug-objects: true
+        """)
     }
   }
 

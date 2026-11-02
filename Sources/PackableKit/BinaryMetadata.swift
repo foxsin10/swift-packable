@@ -22,6 +22,17 @@ public struct BinaryMetadata: Codable, Sendable, Equatable {
   public var modules: [String]
   /// Product name → modules it links.
   public var products: [String: [String]]
+  /// Where the static frameworks' debug objects were put (`--debug-objects`); `nil` when
+  /// they weren't.
+  public var debugObjects: DebugObjects?
+
+  /// The folder whose `<Module>/<platform>/<arch>/` objects hold the DWARF debug info that
+  /// the frameworks' debug maps point at.
+  public struct DebugObjects: Codable, Sendable, Equatable {
+    public var path: String
+    /// Modules with a folder there.
+    public var modules: [String]
+  }
 
   public static func read(from packageDirectory: URL) -> BinaryMetadata? {
     let url = packageDirectory.appendingPathComponent(fileName)

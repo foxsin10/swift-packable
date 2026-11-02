@@ -120,6 +120,7 @@ public struct PackableConfig: Decodable, Sendable {
         forKey: .disableLibraryEvolution
       ) ?? false
       debugInfo = try container.decodeIfPresent(Bool.self, forKey: .debugInfo) ?? false
+      debugObjects = try container.decodeIfPresent(Bool.self, forKey: .debugObjects) ?? false
     }
 
     public var mode: Mode
@@ -136,6 +137,9 @@ public struct PackableConfig: Decodable, Sendable {
     public var disableLibraryEvolution: Bool
     /// Static frameworks keep their DWARF debug info, when building on demand.
     public var debugInfo: Bool
+    /// Static frameworks' debug info goes to a folder in the cache entry, when building on
+    /// demand.
+    public var debugObjects: Bool
 
     enum CodingKeys: String, CodingKey {
       case mode
@@ -147,6 +151,7 @@ public struct PackableConfig: Decodable, Sendable {
       case skipInterfaceVerification = "skip-interface-verification"
       case disableLibraryEvolution = "disable-library-evolution"
       case debugInfo = "debug-info"
+      case debugObjects = "debug-objects"
     }
   }
 
@@ -177,6 +182,11 @@ public struct PackableConfig: Decodable, Sendable {
       let dependency = config.dependencies[name]!
       try dependency.source.validate("\(origin): \(name).source")
       try dependency.binary?.validate("\(origin): \(name).binary")
+      if dependency.debugInfo, dependency.debugObjects {
+        throw MakerError(
+          "\(origin): \(name) sets both debug-info and debug-objects; choose one."
+        )
+      }
     }
     return config
   }

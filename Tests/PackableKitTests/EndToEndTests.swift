@@ -271,8 +271,9 @@ import Testing
   }
 }
 
-/// `debugInfo` packages static frameworks as archives of the targets' object files, which
-/// keep their DWARF debug info, so debuggers can map the sources.
+/// The two ways static frameworks keep their DWARF debug info, so debuggers can map the
+/// sources: `debugInfo` (archives of the targets' object files) and
+/// `debugObjectsDirectory` (those objects in a separate folder).
 @Suite(.serialized) struct DebugInfoEndToEndTests {
   @Test(.timeLimit(.minutes(10)))
   func staticFrameworksKeepSourcePaths() throws {
@@ -305,42 +306,122 @@ import Testing
       #expect(debugInfo.contains(file), "\(module) has no debug info for \(file)")
     }
 
-    let client = work.appendingPathComponent("Client")
-    try FileManager.default.createDirectory(
-      at: client.appendingPathComponent("Sources/Client"),
-      withIntermediateDirectories: true
-    )
-    try """
-      // swift-tools-version:5.9
-      import PackageDescription
-      let package = Package(
-          name: "Client",
-          platforms: [.macOS(.v12)],
-          dependencies: [.package(path: "../DemoBinary")],
-          targets: [.executableTarget(name: "Client", dependencies: [
-              .product(name: "Demo", package: "DemoBinary"),
-          ])]
-      )
-      """.write(
-      to: client.appendingPathComponent("Package.swift"),
-      atomically: true,
-      encoding: .utf8
-    )
-    try """
-      import Demo
-      print(Demo.answer(), Demo.checksum("hello"))
-      """.write(
-      to: client.appendingPathComponent("Sources/Client/main.swift"),
-      atomically: true,
-      encoding: .utf8
-    )
-    let output = try shell.run(
-      ["swift", "run", "--scratch-path", work.appendingPathComponent("client-scratch").path,
-       "Client"],
-      in: client
-    )
+    let output = try runDemoClient(in: work)
     #expect(output.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("42 907060870"))
   }
+
+  /// `debugObjectsDirectory` keeps the frameworks lean (debug map only) and puts the
+  /// objects holding the DWARF in a separate folder that the debug maps point at, so an
+  /// app's debug info survives deleting the build folder.
+  @Test(.timeLimit(.minutes(10)))
+  func debugObjectsOutliveTheBuildFolder() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let fixture = try #require(Bundle.module.url(
+      forResource: "Fixtures/Demo",
+      withExtension: nil
+    ))
+    let source = work.appendingPathComponent("Demo")
+    try FileManager.default.copyItem(at: fixture, to: source)
+    let scratch = work.appendingPathComponent("scratch")
+    let debug = work.appendingPathComponent("debug")
+
+    var options = MakerOptions(
+      packageDirectory: source,
+      outputDirectory: work.appendingPathComponent("DemoBinary")
+    )
+    options.scratchDirectory = scratch
+    options.products = ["Demo"]
+    options.platforms = [.macOS]
+    options.debugObjectsDirectory = debug
+    let result = try Maker(options: options, log: { _ in }).run()
+    #expect(result.warnings.isEmpty)
+    let metadata = try #require(BinaryMetadata.read(from: options.outputDirectory))
+    #expect(metadata.debugObjects?.modules == ["CDemo", "Demo", "DemoCore"])
+
+    let shell = Shell()
+    for (module, file) in [("Demo", "Demo.swift"), ("DemoCore", "Core.swift"), ("CDemo", "cdemo.c")] {
+      let binary = try #require(result.artifacts[module])
+        .appendingPathComponent("macos-arm64_x86_64/\(module).framework/\(module)")
+      #expect(try shell.run(["lipo", "-archs", binary.path]).contains("x86_64 arm64"))
+      let dwarf = try shell.run(["dwarfdump", "--debug-info", binary.path], stream: false)
+      #expect(!dwarf.contains(file), "\(module)'s framework should only have a debug map")
+      let objects = try shell.run(["nm", "-ap", binary.path], stream: false)
+        .split(separator: "\n").filter { $0.contains(" OSO ") }
+      #expect(!objects.isEmpty)
+      for object in objects {
+        #expect(object.contains("\(debug.path)/\(module)/macos/"), "\(object)")
+      }
+      for architecture in ["arm64", "x86_64"] {
+        let folder = debug.appendingPathComponent("\(module)/macos/\(architecture)")
+        let objects = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+          .filter { $0.hasSuffix(".o") }
+          .map { folder.appendingPathComponent($0).path }
+        let dwarf = try shell.run(["dwarfdump", "--debug-info"] + objects, stream: false)
+        #expect(dwarf.contains(file), "\(folder.path) has no debug info for \(file)")
+      }
+    }
+
+    let output = try runDemoClient(in: work)
+    #expect(output.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("42 907060870"))
+
+    // With the build folder gone, dsymutil still finds the library's DWARF through the
+    // client's debug map.
+    try FileManager.default.removeItem(at: scratch)
+    let client = work.appendingPathComponent("client-scratch/debug/Client")
+    let dSYM = work.appendingPathComponent("Client.dSYM")
+    try shell.run(["xcrun", "dsymutil", client.path, "-o", dSYM.path], stream: false)
+    let dwarf = try shell.run(["dwarfdump", "--debug-info", dSYM.path], stream: false)
+    for file in ["Demo.swift", "Core.swift", "cdemo.c"] {
+      #expect(dwarf.contains(file), "the client's dSYM has no debug info for \(file)")
+    }
+
+    // Debug objects are part of the output: missing ones mean a rebuild.
+    let checksum = try #require(result.buildChecksum)
+    let maker = Maker(options: options, log: { _ in })
+    #expect(try maker.upToDateResult(checksum: checksum, products: ["Demo"]) != nil)
+    try FileManager.default.removeItem(at: debug.appendingPathComponent("DemoCore"))
+    #expect(try maker.upToDateResult(checksum: checksum, products: ["Demo"]) == nil)
+  }
+}
+
+/// Builds and runs a client of `<work>/DemoBinary`, scratch path
+/// `<work>/client-scratch`; returns its output.
+private func runDemoClient(in work: URL) throws -> String {
+  let client = work.appendingPathComponent("Client")
+  try FileManager.default.createDirectory(
+    at: client.appendingPathComponent("Sources/Client"),
+    withIntermediateDirectories: true
+  )
+  try """
+    // swift-tools-version:5.9
+    import PackageDescription
+    let package = Package(
+        name: "Client",
+        platforms: [.macOS(.v12)],
+        dependencies: [.package(path: "../DemoBinary")],
+        targets: [.executableTarget(name: "Client", dependencies: [
+            .product(name: "Demo", package: "DemoBinary"),
+        ])]
+    )
+    """.write(
+    to: client.appendingPathComponent("Package.swift"),
+    atomically: true,
+    encoding: .utf8
+  )
+  try """
+    import Demo
+    print(Demo.answer(), Demo.checksum("hello"))
+    """.write(
+    to: client.appendingPathComponent("Sources/Client/main.swift"),
+    atomically: true,
+    encoding: .utf8
+  )
+  return try Shell().run(
+    ["swift", "run", "--scratch-path", work.appendingPathComponent("client-scratch").path,
+     "Client"],
+    in: client
+  )
 }
 
 /// Checks the dynamic slices: dylibs that load their dependencies through `@rpath`,

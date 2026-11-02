@@ -16,7 +16,7 @@ struct SwiftPackable: ParsableCommand {
       `xcodebuild -create-xcframework`, and writes a Package.swift that exposes the \
       results as binary targets.
       """,
-    version: "0.2.0",
+    version: "0.3.0",
     subcommands: [Build.self, List.self, Generate.self, Use.self],
     defaultSubcommand: Build.self
   )
@@ -104,6 +104,13 @@ struct Build: ParsableCommand {
   ))
   var debugInfo = false
 
+  @Option(help: ArgumentHelp(
+    "Put the static frameworks' debug info in this folder, so debuggers and xcsrclink can map their sources while the frameworks stay lean.",
+    discussion: "The targets' object files, which hold the DWARF, are copied to <dir>/<Module>/<platform>/<arch>/ and prelinked from there, so the frameworks' debug maps point at them. Apps link the frameworks as usual; lldb and dsymutil read the debug info while the folder stays at this path. Point xcsrclink at the folder. Can't be combined with --debug-info.",
+    valueName: "dir"
+  ), completion: .directory)
+  var debugObjects: String?
+
   @Flag(help: "Zip each XCFramework and record its SwiftPM checksum.")
   var zip = false
 
@@ -157,6 +164,11 @@ struct Build: ParsableCommand {
     if baseURL != nil, !zip {
       throw ValidationError("--base-url requires --zip.")
     }
+    if debugInfo, debugObjects != nil {
+      throw ValidationError(
+        "--debug-info and --debug-objects can't be combined: one keeps debug info in the frameworks, the other in a separate folder."
+      )
+    }
     guard ["release", "debug"].contains(configuration) else {
       throw ValidationError("--configuration must be release or debug.")
     }
@@ -186,6 +198,8 @@ struct Build: ParsableCommand {
     options.includeBinarySwiftModules = includeBinarySwiftmodules
     options.libraryEvolution = !disableLibraryEvolution
     options.debugInfo = debugInfo
+    options.debugObjectsDirectory = debugObjects
+      .map { URL(fileURLWithPath: $0).standardizedFileURL }
     options.extraBuildArguments = swiftcFlags.flatMap { ["-Xswiftc", $0] }
       + ccFlags.flatMap { ["-Xcc", $0] }
       + linkerFlags.flatMap { ["-Xlinker", $0] }

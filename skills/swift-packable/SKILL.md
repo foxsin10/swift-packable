@@ -43,6 +43,7 @@ swift-packable path/to/MyPackage --zip --base-url https://example.com/releases/1
 | `--include-binary-swiftmodules` | Keep compiled `.swiftmodule`s without skipping verification. |
 | `--disable-library-evolution` | When the package doesn't compile with `-enable-library-evolution`. No `.swiftinterface`s are emitted, only compiled `.swiftmodule`s (so `--skip-interface-verification` isn't needed); clients must use the same compiler. |
 | `--debug-info` | Static frameworks keep DWARF (archive of per-file objects instead of the prelinked `.o`), so lldb/xcsrclink can map sources. Larger; the app loads only referenced members (`-ObjC`/`-all_load` to load all). Dynamic frameworks always have dSYMs. |
+| `--debug-objects <dir>` | Static frameworks stay lean; their per-file objects (the DWARF) go to `<dir>/<Module>/<platform>/<arch>/` and the frameworks' debug maps point there. Works while `<dir>` stays at that path; point xcsrclink at `<dir>`, not the framework. Not with `--debug-info`. |
 | `--bundle-id-prefix`, `--framework-version` | `CFBundleIdentifier` prefix (default `packable`) and bundle version (default `1.0.0`). |
 | `--scratch-path` | Default `<package>/.build/packable`. A new one is seeded from the package's `.build` dependencies as APFS clones (no extra disk). To reclaim an old duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json`. |
 | `-Xswiftc`, `-Xcc`, `-Xlinker` | Pass-through flags (`-Xlinker` also reaches the dylib link with `--linkage dynamic`). |
@@ -62,7 +63,7 @@ MyPackage-binary/
 └── Links/<Dep>/             # link target that pulls that package in
 ```
 
-Clients point their dependency at that folder (or the published URL) instead of the source; `import`s stay the same. Every generated binary package also has `packable-metadata.json` (source tag/commit, the modules it bundles, and the build checksum).
+Clients point their dependency at that folder (or the published URL) instead of the source; `import`s stay the same. Every generated binary package also has `packable-metadata.json` (source tag/commit, the modules it bundles, the build checksum, and with `--debug-objects` the folder and its modules under `debugObjects`).
 
 **Unchanged builds are skipped.** The build checksum is a SHA-256 of the file contents of the package and every package in its graph (minus `.build`, `.git`, `.swiftpm`, output and scratch folders), the output-shaping options, `swift --version`, `xcodebuild -version` and the `swift-packable` binary. If it matches the existing output and the XCFrameworks are all there, the command prints `✔ Up to date` and builds nothing. Modification dates don't count. Use `--rebuild` to force a build.
 
@@ -106,7 +107,9 @@ Binary mode uses `binary:` when declared; otherwise it packages `source` with th
 | A platform slice fails to build | Its SDK is missing: `xcodebuild -showsdks`, then `xcodebuild -downloadPlatform iOS` (or tvOS, watchOS, visionOS). |
 | Interface verification error (e.g. swift-collections 1.7.x) | Rebuild with `--skip-interface-verification` (`skip-interface-verification: true` in `packable.yml`). Clients should then use the same compiler version. |
 | Compile error only with library evolution (passes with plain `swift build`) | Rebuild with `--disable-library-evolution` (`disable-library-evolution: true` in `packable.yml`). Clients must then use the same compiler version. |
-| lldb shows no source for a static framework, or xcsrclink says `no debug info with source paths` | The prelinked object only has a debug map into the scratch folder. Rebuild with `--debug-info` (`debug-info: true` in `packable.yml`). |
+| lldb shows no source for a static framework, or xcsrclink says `no debug info with source paths` | The prelinked object only has a debug map into the scratch folder. Rebuild with `--debug-info` (`debug-info: true`), which embeds the DWARF, or `--debug-objects <dir>` (`debug-objects: true`), which keeps it in a folder on this machine. |
+| xcsrclink says `no debug info with source paths` on a `--debug-objects` framework | Expected: the framework holds only the debug map. Run xcsrclink on the debug objects folder (`debugObjects.path` in `packable-metadata.json`). |
+| `--debug-objects` breakpoints stay pending | The folder was moved or deleted (its path is recorded in the frameworks). Rebuild; the build checksum includes the path, and missing objects trigger a rebuild. |
 | Link errors right after switching modes | Stale objects. `use` cleans `.build` unless `--no-clean` or another SwiftPM process held the lock (it warns); in Xcode also Product › Clean Build Folder. |
 | Hand edits inside `// packable:begin … end` disappear | That block is regenerated. Change `packable.yml` and rerun `generate`. |
 | `generate` stops naming a duplicate module | A binary already bundles a module that another entry also provides. Drop the separate entry, or keep both from source. |
