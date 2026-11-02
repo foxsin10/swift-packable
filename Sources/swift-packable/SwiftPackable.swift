@@ -98,6 +98,12 @@ struct Build: ParsableCommand {
   ))
   var disableLibraryEvolution = false
 
+  @Flag(help: ArgumentHelp(
+    "Keep DWARF debug info in static frameworks, so debuggers and xcsrclink can map their sources.",
+    discussion: "Each static framework becomes an archive of the target's object files instead of one prelinked object, so apps load only the members they reference (pass -ObjC or -all_load to load all). Output is larger. Dynamic frameworks always carry dSYMs."
+  ))
+  var debugInfo = false
+
   @Flag(help: "Zip each XCFramework and record its SwiftPM checksum.")
   var zip = false
 
@@ -179,6 +185,7 @@ struct Build: ParsableCommand {
     options.verifyModuleInterfaces = !skipInterfaceVerification
     options.includeBinarySwiftModules = includeBinarySwiftmodules
     options.libraryEvolution = !disableLibraryEvolution
+    options.debugInfo = debugInfo
     options.extraBuildArguments = swiftcFlags.flatMap { ["-Xswiftc", $0] }
       + ccFlags.flatMap { ["-Xcc", $0] }
       + linkerFlags.flatMap { ["-Xlinker", $0] }

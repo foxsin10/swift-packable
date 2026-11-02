@@ -121,7 +121,7 @@ Clients only need to point their dependency at this directory (or at the publish
 Every build records a **build checksum** in the output's `packable-metadata.json`. It is a SHA-256 of:
 
 - the file contents of the package and of every package in its dependency graph (local path dependencies and resolved remote checkouts), leaving out `.build`, `.git`, `.swiftpm` and the output and scratch folders
-- the options that shape the output (products, platforms, architectures, deployment targets, configuration, linkage, interface and `.swiftmodule` settings, pass-through flags, zip and base URL, bundle ID prefix, framework version)
+- the options that shape the output (products, platforms, architectures, deployment targets, configuration, linkage, interface and `.swiftmodule` settings, debug info, pass-through flags, zip and base URL, bundle ID prefix, framework version)
 - the toolchain (`swift --version`, `xcodebuild -version`) and the `swift-packable` binary itself
 
 When the checksum matches the existing output and all of its XCFrameworks are still there, nothing is built: the command prints `✔ Up to date` and leaves the output as it is. Only the package graph is resolved and the files are read. Pass `--rebuild` to build anyway. Modification dates don't count, so a fresh clone or `touch` doesn't trigger a rebuild.
@@ -140,6 +140,7 @@ When the checksum matches the existing output and all of its XCFrameworks are st
 | `--skip-interface-verification` | Skip `.swiftinterface` verification (see below) |
 | `--include-binary-swiftmodules` | Keep the compiled `.swiftmodule` files in the XCFrameworks |
 | `--disable-library-evolution` | Build without `-enable-library-evolution`, for packages that don't compile with it (see below) |
+| `--debug-info` | Keep DWARF debug info in static frameworks, so lldb and tools like xcsrclink can map their sources (see [Debug info](#debug-info-in-static-frameworks)) |
 | `-Xswiftc` / `-Xcc` / `-Xlinker` | Pass flags through to `swift build` (`-Xlinker` also reaches the dylib link with `--linkage dynamic`) |
 | `--scratch-path` | SwiftPM's working folder (default `<package>/.build/packable`). When it's new and the package's `.build` already has resolved dependencies, their checkouts, repositories and artifacts are copied in as APFS clones, so they take no extra disk space. Elsewhere, or if SwiftPM rejects the copy, dependencies are resolved as usual. To reclaim an existing scratch folder's duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json` |
 | `--rebuild` | Build even when the build checksum shows the output is up to date (see [Skipping unchanged builds](#skipping-unchanged-builds)) |
@@ -218,19 +219,24 @@ dependencies:
     mode: binary                          # source (default) | binary
     source: { path: ../ShowcaseKit }      # or { url: https://…, from: 1.2.0 }
     binary: { path: ../ShowcaseKit-binary }  # optional, see below
-    linkage: dynamic                      # static (default) | dynamic, for on-demand builds
   Alamofire:
     source: { url: https://github.com/Alamofire/Alamofire.git, from: 5.9.0 }
+    binary: { url: https://github.com/example/Alamofire-binary.git, exact: 5.9.1 }  # a released binary package
   Logging:
     mode: binary
     source: { url: https://github.com/apple/swift-log.git, exact: 1.6.1 }
-    products: [Logging]
-    platforms: [ios, ios-simulator]
+    # No `binary:`, so binary mode builds one; these keys shape that build:
+    products: [Logging]                   # default: all library products
+    platforms: [ios, ios-simulator]       # default: the source manifest's platforms
+    linkage: dynamic                      # static (default) | dynamic
+    skip-interface-verification: true     # default false
+    disable-library-evolution: false      # default false
+    debug-info: false                     # default false; static frameworks only
 ```
 
 ### `packable.yml` reference
 
-Relative paths are resolved against the directory that holds `packable.yml`.
+Relative paths are resolved against the directory that holds `packable.yml`. Write each dependency as a block mapping (`Name:` on its own line with its keys indented below), because `use` rewrites the `mode:` line as text, keeping comments and layout; a missing `mode:` line is added. Locations can use the flow style (`{ path: … }`). A dependency name can be quoted (`"My-Kit":`).
 
 Top level:
 
@@ -251,8 +257,9 @@ Dependency entry:
 | `linkage` | no | `static` | `static` or `dynamic` frameworks when building on demand. The two are cached separately. |
 | `skip-interface-verification` | no | `false` | Skip `.swiftinterface` verification when building on demand. |
 | `disable-library-evolution` | no | `false` | Build without library evolution when building on demand. |
+| `debug-info` | no | `false` | Keep DWARF debug info in static frameworks when building on demand, like `--debug-info`. Cached separately. |
 
-`products`, `platforms`, `linkage`, `skip-interface-verification` and `disable-library-evolution` only apply to binaries built on demand. A declared `binary:` is used as it is.
+`products`, `platforms`, `linkage`, `skip-interface-verification`, `disable-library-evolution` and `debug-info` only apply to binaries built on demand. A declared `binary:` is used as it is.
 
 #### Locations
 
@@ -274,10 +281,53 @@ A `path` takes no version requirement, and a `url` needs exactly one. Anything e
 ```bash
 swift-packable generate                  # write the dependency block into Package.swift
 swift-packable use binary ShowcaseKit    # flip modes in packable.yml, regenerate, clear .build
+swift-packable use source ShowcaseKit MathUtils
 swift-packable use source --all
 ```
 
-`generate` writes a block between `// packable:begin` and `// packable:end` (inserted after `import PackageDescription` the first time). The rest of `Package.swift` stays yours and uses the block's two names, which don't change between modes:
+| Option | Applies to | Description |
+| --- | --- | --- |
+| `--package-path` | both | The client package whose `Package.swift` gets the block. Default: the current directory |
+| `--config` | both | The config file. Default: `<package-path>/packable.yml` |
+| `--rebuild` | both | Rebuild binaries built on demand even when the cached ones are current, and move remote sources to the newest version their requirement allows |
+| `-v, --verbose` | both | Stream build output |
+| `--all` | `use` | Switch every dependency, instead of naming them |
+| `--no-clean` | `use` | Keep `.build` as it is (see [Checks](#checks)) |
+
+`use` changes only `mode:` in `packable.yml`, then runs `generate`. A name that isn't in `packable.yml` fails with the list of declared names; switching to the mode a dependency already has prints `Already <mode>`, regenerates and leaves `.build` alone.
+
+### The generated block
+
+`generate` writes a block between `// packable:begin` and `// packable:end` (inserted after `import PackageDescription` the first time, replaced on later runs). For the `SwitchableApp` example in binary mode it is:
+
+```swift
+// packable:begin
+// Generated by `swift-packable generate` from packable.yml; don't edit by hand.
+// Switch modes with `swift-packable use source|binary <name>`.
+// swiftformat:disable all
+// ShowcaseKit: binary
+
+let packableDependencies: [Package.Dependency] = [
+  .package(path: ".build/packable-cache/ShowcaseKit/local/ShowcaseKit-binary"),
+]
+
+/// A product of a dependency declared in packable.yml, in its current mode.
+func packable(_ product: String, from dependency: String) -> Target.Dependency {
+  let packages: [String: String] = [
+    "ShowcaseKit": "ShowcaseKit-binary",
+  ]
+  return .product(name: product, package: packages[dependency] ?? dependency)
+}
+// swiftformat:enable all
+// packable:end
+```
+
+- **`packableDependencies`** has one `.package(…)` per entry, in name order: the `source:` location in source mode, the `binary:` location or the on-demand build's folder in binary mode. Paths are rewritten relative to the package.
+- **`packable(_ product:, from:)`** takes a library product name and the entry's name in `packable.yml`, and returns `.product(name:package:)` with the package name for the current mode. That name changes between modes (`ShowcaseKit` from source, `ShowcaseKit-binary` from an on-demand build), which is why targets go through `packable(…)` and not `.product(…)` directly. The package name is a location's last path component without `.git`; a name missing from the table is used as the package name as is.
+- In binary mode only the products that were packaged exist, so with `products:` set, `packable(…)` should name one of them.
+- SwiftFormat is switched off inside the block, so formatting doesn't fight the next `generate`.
+
+The rest of `Package.swift` stays yours and uses the block's two names, which don't change between modes:
 
 ```swift
 let package = Package(
@@ -289,14 +339,24 @@ let package = Package(
 )
 ```
 
-Where binaries come from:
+### Where binaries come from
 
 - **Declared:** `binary:` points at a binary package, either one this tool generated or a released one at a URL.
 - **Built on demand:** without `binary:`, the source is packaged with the same pipeline as `build` and cached in the package's `.build/packable-cache` (override with `cache:` in `packable.yml`). Local sources are rebuilt only when their [build checksum](#skipping-unchanged-builds) changes: their files, their dependencies' files, the build settings or the toolchain. Remote sources are resolved by SwiftPM and cached per version. `.build` isn't committed, so run `generate` after cloning, and after `swift package clean` or `swift package reset` (both delete it), to fill the cache again.
 
-Checks:
+The cache holds one folder per entry. Dynamic builds get a `-dynamic` suffix and static builds with `debug-info: true` a `-debug-info` suffix, so switching those back and forth doesn't rebuild:
 
-- **Clean switch:** `use` clears `.build` (keeping checkouts, downloads, the lock file, sourcekit-lsp's `index-build` and `packable-cache`), because objects left from the other mode break linking. If another SwiftPM process holds the package's lock, the clean is skipped with a warning. In Xcode, also run Product › Clean Build Folder.
+```
+.build/packable-cache/
+├── ShowcaseKit/local/ShowcaseKit-binary/            # local source
+├── Logging/1.6.1-dynamic/Logging-binary/            # remote source, by resolved tag
+├── Logging/resolver/                                # throwaway package that resolves the remote source
+└── Kit/rev-4f2c1e0a1b2c/Kit-binary/                 # branch or revision: rev-<first 12 of the commit>
+```
+
+### Checks
+
+- **Clean switch:** `use` clears `.build` (keeping checkouts, downloads, the lock file, sourcekit-lsp's `index-build` and `packable-cache`), because objects left from the other mode break linking. `--no-clean` skips it. If another SwiftPM process holds the package's lock, the clean is skipped with a warning. In Xcode, also run Product › Clean Build Folder.
 - **Duplicate modules:** a binary package bundles its dependencies' modules. If another entry provides one of them, `generate` stops and names the module (for example, MathUtils both bundled in the ShowcaseKit binary and declared on its own).
 - **Version drift:** for declared binaries, `generate` warns when the binary was built from a different tag or commit than the source points at (from `packable-metadata.json`, written next to every generated binary package).
 - **Rollback:** if regenerating fails, `use` restores `packable.yml`.
@@ -323,6 +383,7 @@ Static frameworks remain the default, since each dynamic framework adds a little
 - **System library targets.** A `.systemLibrary` target that a packaged module depends on (for example `GRDBSQLite` in GRDB) gets an XCFramework with its module map, headers and an empty binary, because modules whose interface imports it can't compile without it. Its `link` directive still links the system library.
 - **Resources work through the generated package.** For a static module with resources, the generated `Package.swift` renames its binary target to `<Module>Binary` and adds a small target named `<Module>` that carries the original resource files (under `Resources/<Module>/`). SwiftPM and Xcode process them for the client's platform and install `<Package>_<Module>.bundle` where the compiled `Bundle.module` looks for it, so nothing has to be copied by hand. The bundle name comes from the package the module was built in, so a dependency's carriers (for example RevenueCatUI's) sit in a small local package with that dependency's name, `Packages/<Package>-resources/`, which the generated package pulls in through a link target `<Package>Resources`. Declared `.process`/`.copy` resources are carried, plus the types SwiftPM picks up implicitly (asset catalogs, `.xib`, `.storyboard`, `.lproj`, `.xcstrings`, Core Data and Metal files). The bundle is also inside each static framework, for apps that use an XCFramework directly without the package; those apps must copy it into their bundle themselves.
 - **Interface verification failures.** Some libraries (for example swift-collections 1.7.x) emit `.swiftinterface` files that don't verify with the current compiler. Pass `--skip-interface-verification` in that case; the tool then also keeps the compiled `.swiftmodule` files, so clients using the same compiler version can still import the modules.
+- <a id="debug-info-in-static-frameworks"></a>**Debug info in static frameworks.** By default a static framework's binary is SwiftPM's prelinked `<Module>.o`. `ld -r` doesn't copy DWARF into it, only a debug map pointing at the object files in the scratch folder, so once the framework is used elsewhere (or the scratch folder is gone) lldb can't show its sources, and xcsrclink reports `no debug info with source paths`. With `--debug-info` the binary is instead an archive of the target's own object files, which keep their DWARF and the absolute source paths of the build machine. It's larger (about 2.5× for a typical module), and the app's linker loads only the members it references, as with any static library Xcode builds: a file that nothing references by symbol, such as one that only adds a protocol conformance used through `as?`, is left out unless the app links with `-ObjC` or `-all_load`. Dynamic frameworks don't need the flag: their dSYMs are made while the object files still exist.
 - **Packages that don't compile with library evolution.** Some code builds normally but fails with `-enable-library-evolution`. Pass `--disable-library-evolution` to build without it. The modules are then not resilient, so no `.swiftinterface` files are emitted (the compiler only supports them with library evolution): each framework carries the compiled `.swiftmodule` files, the XCFrameworks are created with `-allow-internal-distribution`, and the tool warns that clients must use the same Swift compiler as the build. On another compiler they fail to import. `--skip-interface-verification` has no effect in this mode.
 - **Any target layout.** Targets with a custom `path:` (including `path: "."` narrowed with `sources:`/`exclude:`) and the `Source/`, `src/`, `srcs/` default folders work. Resources come from SwiftPM's own resolved list (`swift package describe`), so `exclude:` and implicit resource types match what SwiftPM builds; asset catalogs, which that list leaves out, are added from a scan of the target folder. Localized files keep their `.lproj` folders, where SwiftPM reads the language from; and only header files are copied into a framework's `Headers/`, even when public headers sit next to sources (`publicHeadersPath: "."`).
 - **Macro and binaryTarget dependencies** aren't packaged yet.

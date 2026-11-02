@@ -30,6 +30,11 @@ public struct MakerOptions: Sendable {
   /// the compiled `.swiftmodule` files are kept too and clients should use the same
   /// compiler that built them.
   public var libraryEvolution: Bool = true
+  /// Static frameworks archive the targets' object files, which hold DWARF debug info,
+  /// instead of SwiftPM's prelinked `<Name>.o`, whose debug map only points at them in
+  /// the build folder. The app's linker then loads only the members it references.
+  /// Dynamic frameworks carry debug info in their dSYMs either way.
+  public var debugInfo: Bool = false
   public var extraBuildArguments: [String] = []
   public var zip: Bool = false
   /// When set together with `zip`, the generated manifest points at
@@ -196,9 +201,24 @@ public struct Maker: Sendable {
             }
             let directory = platformStaging
               .appendingPathComponent("arch/\(architecture)/\(module.name)")
+            var linkFileList: URL?
+            if options.debugInfo, options.linkage == .static,
+               !systemLibraries.contains(where: { $0.name == module.name }) {
+              linkFileList = productsDirectory.linkFileList(
+                of: module,
+                index: index,
+                architecture: architecture
+              )
+              let warning =
+                "\(module.name): no list of object files in the build folder, so its framework has no debug info."
+              if linkFileList == nil, !result.warnings.contains(warning) {
+                result.warnings.append(warning)
+              }
+            }
             snapshots[module.name, default: [:]][architecture] = try merger.snapshot(
               module,
-              into: directory
+              into: directory,
+              linkFileList: linkFileList
             )
           }
         }
@@ -495,6 +515,7 @@ public struct Maker: Sendable {
       "verify-interfaces:\(options.verifyModuleInterfaces)",
       "binary-swiftmodules:\(options.includeBinarySwiftModules)",
       "library-evolution:\(options.libraryEvolution)",
+    ] + (options.debugInfo ? ["debug-info:true"] : []) + [
       "build-arguments:" + options.extraBuildArguments.joined(separator: "\u{1F}"),
       "zip:\(options.zip)",
       "base-url:" + (options.baseURL ?? ""),

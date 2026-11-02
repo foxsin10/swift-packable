@@ -34,7 +34,13 @@ struct ArchitectureMerger {
   }
 
   /// Copies the parts of `module` that the next build will overwrite into `directory`.
-  func snapshot(_ module: BuiltModule, into directory: URL) throws -> BuiltModule {
+  /// With `linkFileList`, the target's object files are also archived into
+  /// `<Name>.a`, keeping their debug info.
+  func snapshot(
+    _ module: BuiltModule,
+    into directory: URL,
+    linkFileList: URL? = nil
+  ) throws -> BuiltModule {
     let fileManager = FileManager.default
     try? fileManager.removeItem(at: directory)
     try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -51,11 +57,22 @@ struct ArchitectureMerger {
     case .clang:
       module.kind // headers come from the package sources, not the build
     }
+    var archive: URL?
+    if let linkFileList {
+      let url = directory.appendingPathComponent("\(module.name).a")
+      try shell.run(
+        ["libtool", "-static", "-D", "-no_warning_for_no_symbols"]
+          + ["-o", url.path, "-filelist", linkFileList.path],
+        stream: false
+      )
+      archive = url
+    }
     return try BuiltModule(
       name: module.name,
       object: copy(module.object),
       kind: kind,
-      resourceBundle: module.resourceBundle.map(copy)
+      resourceBundle: module.resourceBundle.map(copy),
+      archive: archive
     )
   }
 
@@ -78,6 +95,16 @@ struct ArchitectureMerger {
       ["lipo", "-create"] + slices.map(\.object.path) + ["-output", object.path],
       stream: false
     )
+    var archive: URL?
+    let archives = slices.compactMap(\.archive)
+    if archives.count == slices.count, let first = archives.first {
+      let url = directory.appendingPathComponent(first.lastPathComponent)
+      try shell.run(
+        ["lipo", "-create"] + archives.map(\.path) + ["-output", url.path],
+        stream: false
+      )
+      archive = url
+    }
 
     let kind: BuiltModule.Kind
     switch first.kind {
@@ -121,7 +148,8 @@ struct ArchitectureMerger {
       name: first.name,
       object: object,
       kind: kind,
-      resourceBundle: first.resourceBundle
+      resourceBundle: first.resourceBundle,
+      archive: archive
     )
   }
 }

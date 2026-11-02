@@ -237,7 +237,11 @@ public struct DependencySwitcher: Sendable {
     let root = cache.appendingPathComponent(name)
     // Static and dynamic builds of one version are kept apart, so switching `linkage:`
     // back and forth doesn't rebuild.
-    let variant = dependency.linkage == .static ? "" : "-\(dependency.linkage.rawValue)"
+    var variant = dependency.linkage == .static ? "" : "-\(dependency.linkage.rawValue)"
+    // Debug info only changes static frameworks.
+    if dependency.debugInfo, dependency.linkage == .static {
+      variant += "-debug-info"
+    }
 
     if let path = dependency.source.path {
       let source = absoluteURL(path)
@@ -336,6 +340,7 @@ public struct DependencySwitcher: Sendable {
     }
     options.verifyModuleInterfaces = !dependency.skipInterfaceVerification
     options.libraryEvolution = !dependency.disableLibraryEvolution
+    options.debugInfo = dependency.debugInfo
     options.linkage = dependency.linkage
     options.rebuild = self.options.rebuild
     options.verbose = self.options.verbose

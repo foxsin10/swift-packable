@@ -42,6 +42,7 @@ swift-packable path/to/MyPackage --zip --base-url https://example.com/releases/1
 | `--skip-interface-verification` | When emitted `.swiftinterface` files don't verify. Also keeps compiled `.swiftmodule`s. |
 | `--include-binary-swiftmodules` | Keep compiled `.swiftmodule`s without skipping verification. |
 | `--disable-library-evolution` | When the package doesn't compile with `-enable-library-evolution`. No `.swiftinterface`s are emitted, only compiled `.swiftmodule`s (so `--skip-interface-verification` isn't needed); clients must use the same compiler. |
+| `--debug-info` | Static frameworks keep DWARF (archive of per-file objects instead of the prelinked `.o`), so lldb/xcsrclink can map sources. Larger; the app loads only referenced members (`-ObjC`/`-all_load` to load all). Dynamic frameworks always have dSYMs. |
 | `--bundle-id-prefix`, `--framework-version` | `CFBundleIdentifier` prefix (default `packable`) and bundle version (default `1.0.0`). |
 | `--scratch-path` | Default `<package>/.build/packable`. A new one is seeded from the package's `.build` dependencies as APFS clones (no extra disk). To reclaim an old duplicate, delete its `checkouts`, `repositories`, `artifacts` and `workspace-state.json`. |
 | `-Xswiftc`, `-Xcc`, `-Xlinker` | Pass-through flags (`-Xlinker` also reaches the dylib link with `--linkage dynamic`). |
@@ -82,8 +83,8 @@ What is handled for you:
        mode: source
        source: { path: ../ShowcaseKit }
    ```
-2. Run `swift-packable generate`. It inserts `packableDependencies` and `packable(_:from:)` between `// packable:begin` and `// packable:end`.
-3. Use those two names in the rest of the manifest. They don't change between modes:
+2. Run `swift-packable generate`. It inserts `packableDependencies` and `packable(_:from:)` between `// packable:begin` and `// packable:end` (full block and options in [packable-yml.md](references/packable-yml.md)).
+3. Use those two names in the rest of the manifest. They don't change between modes. `packable("<product>", from: "<packable.yml key>")` resolves the package name for the current mode, so never write `.product(…)` for these dependencies:
    ```swift
    let package = Package(
      name: "App",
@@ -93,7 +94,7 @@ What is handled for you:
      ]
    )
    ```
-4. Flip with `swift-packable use binary ShowcaseKit` (or `use source --all`). `use` clears `.build` except checkouts, downloads, the lock file, `index-build` and `packable-cache`; `--no-clean` skips that.
+4. Flip with `swift-packable use binary ShowcaseKit` (or `use source --all`). `use` clears `.build` except checkouts, downloads, the lock file, `index-build` and `packable-cache`; `--no-clean` skips that. `generate` and `use` both take `--package-path`, `--config`, `--rebuild` and `-v`.
 
 Binary mode uses `binary:` when declared; otherwise it packages `source` with the build pipeline and caches it in the package's `.build/packable-cache` (or `cache:`). Local sources rebuild only when their build checksum changes (their files, their dependencies' files, settings or toolchain); remote sources are cached per version. `--rebuild` (on `generate` or `use`) forces a rebuild and moves remote sources to their newest allowed version.
 
@@ -105,10 +106,13 @@ Binary mode uses `binary:` when declared; otherwise it packages `source` with th
 | A platform slice fails to build | Its SDK is missing: `xcodebuild -showsdks`, then `xcodebuild -downloadPlatform iOS` (or tvOS, watchOS, visionOS). |
 | Interface verification error (e.g. swift-collections 1.7.x) | Rebuild with `--skip-interface-verification` (`skip-interface-verification: true` in `packable.yml`). Clients should then use the same compiler version. |
 | Compile error only with library evolution (passes with plain `swift build`) | Rebuild with `--disable-library-evolution` (`disable-library-evolution: true` in `packable.yml`). Clients must then use the same compiler version. |
+| lldb shows no source for a static framework, or xcsrclink says `no debug info with source paths` | The prelinked object only has a debug map into the scratch folder. Rebuild with `--debug-info` (`debug-info: true` in `packable.yml`). |
 | Link errors right after switching modes | Stale objects. `use` cleans `.build` unless `--no-clean` or another SwiftPM process held the lock (it warns); in Xcode also Product › Clean Build Folder. |
 | Hand edits inside `// packable:begin … end` disappear | That block is regenerated. Change `packable.yml` and rerun `generate`. |
 | `generate` stops naming a duplicate module | A binary already bundles a module that another entry also provides. Drop the separate entry, or keep both from source. |
 | Warning that a binary was built from a different tag/commit | Version drift between `binary:` and `source:`. Rebuild or repoint the binary. |
+| ``Couldn't find `Name:` (in block style)`` from `use` | The dependency is written in flow style (`Name: { … }`). Rewrite it as a block mapping; locations may stay flow style. |
+| `'<name>' isn't declared in packable.yml` | `use` takes `packable.yml` keys, not product or package names. |
 | Validation error on a location | A `path` takes no version; a `url` needs exactly one of `from`, `exact`, `up-to-next-minor`, `branch`, `revision`. |
 | Fresh clone, or after `swift package clean`/`reset`, the binary package path is missing | Run `swift-packable generate` to rebuild the cache in `.build/packable-cache`. |
 | `swift run` with dynamic frameworks: `Library not loaded: @rpath/…` | `swift run -Xlinker -rpath -Xlinker @executable_path`, or `--build-system native`. Apps and `swift test` are fine. |

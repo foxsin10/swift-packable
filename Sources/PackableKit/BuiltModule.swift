@@ -16,6 +16,10 @@ public struct BuiltModule: Sendable {
   public let object: URL
   public let kind: Kind
   public let resourceBundle: URL?
+  /// A static library of the target's own object files, when debug info is wanted. Unlike
+  /// `object`, whose debug map only points at those files in the build folder, they hold
+  /// the DWARF debug info.
+  public var archive: URL? = nil
 }
 
 /// Library and system library targets of all packages in the graph, keyed by module
@@ -178,20 +182,12 @@ public struct BuildProductsDirectory: Sendable {
       let moduleName: String
     }
     let fileManager = FileManager.default
-    let intermediates = url.deletingLastPathComponent().deletingLastPathComponent()
-      .appendingPathComponent("Intermediates.noindex")
-    // Package folders are named by Swift Build, so every one is searched.
-    let packageFolders = ((try? fileManager.contentsOfDirectory(atPath: intermediates.path)) ?? [])
-      .filter { $0.hasSuffix(".build") }
     var imported = Set<String>()
     for module in modules {
       guard case .swift = module.kind, let entry = index.entries[module.name] else {
         continue
       }
-      let scans = packageFolders.flatMap { folder in
-        let objects = intermediates.appendingPathComponent(folder)
-          .appendingPathComponent(url.lastPathComponent)
-          .appendingPathComponent("\(entry.target.name)-t.build/Objects-normal/\(architecture)")
+      let scans = objectDirectories(of: entry.target, architecture: architecture).flatMap { objects in
         let files = (try? fileManager.contentsOfDirectory(atPath: objects.path)) ?? []
         return files
           .filter { $0.hasPrefix("\(module.name)-dependencies-") && $0.hasSuffix(".json") }
@@ -209,6 +205,33 @@ public struct BuildProductsDirectory: Sendable {
       }
     }
     return imported
+  }
+
+  /// The list of `module`'s own object files that Swift Build links into `<Name>.o`
+  /// (`<Target>.LinkFileList`), or `nil` when the build folder doesn't have one.
+  func linkFileList(of module: BuiltModule, index: TargetIndex, architecture: String) -> URL? {
+    guard let target = index.entries[module.name]?.target else {
+      return nil
+    }
+    return objectDirectories(of: target, architecture: architecture)
+      .map { $0.appendingPathComponent("\(target.name).LinkFileList") }
+      .first { FileManager.default.fileExists(atPath: $0.path) }
+  }
+
+  /// `target`'s `Objects-normal/<arch>` folders. Package folders are named by Swift
+  /// Build, so every one is searched.
+  private func objectDirectories(
+    of target: PackageManifest.Target,
+    architecture: String
+  ) -> [URL] {
+    let intermediates = url.deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("Intermediates.noindex")
+    let folders = (try? FileManager.default.contentsOfDirectory(atPath: intermediates.path)) ?? []
+    return folders.filter { $0.hasSuffix(".build") }.map { folder in
+      intermediates.appendingPathComponent(folder)
+        .appendingPathComponent(url.lastPathComponent)
+        .appendingPathComponent("\(target.name)-t.build/Objects-normal/\(architecture)")
+    }
   }
 
   /// Swift modules that can be left out: empty ones (no exported symbols, so nothing to

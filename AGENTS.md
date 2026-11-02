@@ -2,7 +2,7 @@
 
 ## Keep docs in sync
 
-`README.md` and the agent skill in `skills/swift-packable/` (`SKILL.md`, `references/packable-yml.md`) describe the same CLI. When you change a command, flag, default, `packable.yml` key, output layout or error message, update both in the same change.
+`README.md` and the agent skill in `skills/swift-packable/` (`SKILL.md`, `references/packable-yml.md`) describe the same CLI. When we change a command, flag, default, `packable.yml` key, output layout or error message, update both in the same change. Also when we update features of this package, sync all updates to skill and readme.
 
 ## Versioning
 

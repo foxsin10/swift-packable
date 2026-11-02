@@ -227,6 +227,11 @@ import Testing
     let files = try FileManager.default.contentsOfDirectory(atPath: module.path)
     #expect(files.contains("arm64-apple-macos.swiftmodule"))
     #expect(!files.contains { $0.hasSuffix(".swiftinterface") })
+    // Without `debugInfo`, the prelinked object only points at the build folder.
+    let binary = try #require(result.artifacts["Demo"])
+      .appendingPathComponent("macos-arm64/Demo.framework/Demo")
+    let debugInfo = try Shell().run(["dwarfdump", "--debug-info", binary.path], stream: false)
+    #expect(!debugInfo.contains("Demo.swift"))
 
     let client = work.appendingPathComponent("Client")
     try FileManager.default.createDirectory(
@@ -258,6 +263,78 @@ import Testing
       encoding: .utf8
     )
     let output = try Shell().run(
+      ["swift", "run", "--scratch-path", work.appendingPathComponent("client-scratch").path,
+       "Client"],
+      in: client
+    )
+    #expect(output.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("42 907060870"))
+  }
+}
+
+/// `debugInfo` packages static frameworks as archives of the targets' object files, which
+/// keep their DWARF debug info, so debuggers can map the sources.
+@Suite(.serialized) struct DebugInfoEndToEndTests {
+  @Test(.timeLimit(.minutes(10)))
+  func staticFrameworksKeepSourcePaths() throws {
+    let work = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: work) }
+    let fixture = try #require(Bundle.module.url(
+      forResource: "Fixtures/Demo",
+      withExtension: nil
+    ))
+    let source = work.appendingPathComponent("Demo")
+    try FileManager.default.copyItem(at: fixture, to: source)
+
+    var options = MakerOptions(
+      packageDirectory: source,
+      outputDirectory: work.appendingPathComponent("DemoBinary")
+    )
+    options.scratchDirectory = work.appendingPathComponent("scratch")
+    options.products = ["Demo"]
+    options.platforms = [.macOS]
+    options.debugInfo = true
+    let result = try Maker(options: options, log: { _ in }).run()
+    #expect(result.warnings.isEmpty)
+
+    let shell = Shell()
+    for (module, file) in [("Demo", "Demo.swift"), ("DemoCore", "Core.swift"), ("CDemo", "cdemo.c")] {
+      let binary = try #require(result.artifacts[module])
+        .appendingPathComponent("macos-arm64_x86_64/\(module).framework/\(module)")
+      #expect(try shell.run(["lipo", "-archs", binary.path]).contains("x86_64 arm64"))
+      let debugInfo = try shell.run(["dwarfdump", "--debug-info", binary.path], stream: false)
+      #expect(debugInfo.contains(file), "\(module) has no debug info for \(file)")
+    }
+
+    let client = work.appendingPathComponent("Client")
+    try FileManager.default.createDirectory(
+      at: client.appendingPathComponent("Sources/Client"),
+      withIntermediateDirectories: true
+    )
+    try """
+      // swift-tools-version:5.9
+      import PackageDescription
+      let package = Package(
+          name: "Client",
+          platforms: [.macOS(.v12)],
+          dependencies: [.package(path: "../DemoBinary")],
+          targets: [.executableTarget(name: "Client", dependencies: [
+              .product(name: "Demo", package: "DemoBinary"),
+          ])]
+      )
+      """.write(
+      to: client.appendingPathComponent("Package.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try """
+      import Demo
+      print(Demo.answer(), Demo.checksum("hello"))
+      """.write(
+      to: client.appendingPathComponent("Sources/Client/main.swift"),
+      atomically: true,
+      encoding: .utf8
+    )
+    let output = try shell.run(
       ["swift", "run", "--scratch-path", work.appendingPathComponent("client-scratch").path,
        "Client"],
       in: client

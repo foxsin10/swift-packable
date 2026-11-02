@@ -119,6 +119,7 @@ public struct PackableConfig: Decodable, Sendable {
         Bool.self,
         forKey: .disableLibraryEvolution
       ) ?? false
+      debugInfo = try container.decodeIfPresent(Bool.self, forKey: .debugInfo) ?? false
     }
 
     public var mode: Mode
@@ -133,6 +134,8 @@ public struct PackableConfig: Decodable, Sendable {
     public var linkage: Linkage
     public var skipInterfaceVerification: Bool
     public var disableLibraryEvolution: Bool
+    /// Static frameworks keep their DWARF debug info, when building on demand.
+    public var debugInfo: Bool
 
     enum CodingKeys: String, CodingKey {
       case mode
@@ -143,6 +146,7 @@ public struct PackableConfig: Decodable, Sendable {
       case linkage
       case skipInterfaceVerification = "skip-interface-verification"
       case disableLibraryEvolution = "disable-library-evolution"
+      case debugInfo = "debug-info"
     }
   }
 

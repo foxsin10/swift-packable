@@ -67,8 +67,12 @@ public struct FrameworkAssembler: Sendable {
     var minimumOSVersion: String?
     switch linkage {
     case .static:
-      let libtool = ["libtool", "-static", "-D", "-no_warning_for_no_symbols"]
-      try shell.run(libtool + ["-o", binary.path, module.object.path], stream: false)
+      if let archive = module.archive {
+        try fileManager.copyItem(at: archive, to: binary)
+      } else {
+        let libtool = ["libtool", "-static", "-D", "-no_warning_for_no_symbols"]
+        try shell.run(libtool + ["-o", binary.path, module.object.path], stream: false)
+      }
     case .dynamic:
       minimumOSVersion = try linkDynamicLibrary(
         module,
