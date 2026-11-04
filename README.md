@@ -416,3 +416,7 @@ Static frameworks remain the default, since each dynamic framework adds a little
 ```bash
 swift test   # Unit tests + an end-to-end test (packages Tests/.../Fixtures/Demo, then builds and runs a client against the output)
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
